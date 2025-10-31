@@ -1,0 +1,871 @@
+"""
+Google Drive Document Archive Manager with Pydantic AI
+
+This script manages documents in Google Drive by using an AI agent to classify them
+and organize them into appropriate folder structures based on their metadata.
+"""
+
+import os
+import traceback
+from dataclasses import dataclass
+from io import BytesIO
+from agentic_document_classifier import classify_document
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
+from pydantic_ai import Agent, RunContext
+
+
+# =============================================================================
+# Configuration from Environment Variables
+# =============================================================================
+SERVICE_ACCOUNT_KEY_PATH = os.environ.get("SERVICE_ACCOUNT_KEY_PATH")
+ROOT_FOLDER_ID = os.environ.get("ROOT_FOLDER_ID")
+IMPERSONATED_EMAIL = os.environ.get("IMPERSONATED_EMAIL")
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
+COMPANY_FISCAL_ID = os.environ.get("COMPANY_FISCAL_ID")
+COMPANY_NAME = os.environ.get("COMPANY_NAME")
+
+# Validate required environment variables
+required_env_vars = {
+    "COMPANY_FISCAL_ID": COMPANY_FISCAL_ID,
+    "COMPANY_NAME": COMPANY_NAME,
+    "GOOGLE_API_KEY": GOOGLE_API_KEY,
+    "IMPERSONATED_EMAIL": IMPERSONATED_EMAIL,
+    "ROOT_FOLDER_ID": ROOT_FOLDER_ID,
+    "SERVICE_ACCOUNT_KEY_PATH": SERVICE_ACCOUNT_KEY_PATH,
+}
+
+missing_vars = [key for key, value in required_env_vars.items() if not value]
+if missing_vars:
+    raise EnvironmentError(
+        f"Missing required environment variables: {', '.join(missing_vars)}"
+    )
+
+# Global variables for folder IDs (initialized at runtime)
+DROP_FOLDER_ID = None
+UNCLASSIFIED_FOLDER_ID = None
+LEFT_BEHIND_FOLDER_ID = None
+ARCHIVE_ROOT_FOLDER_ID = None
+
+# =============================================================================
+# Constants
+# =============================================================================
+
+# COMMON API Configuration
+DRIVE_API_SCOPES = [
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/drive.file",
+]
+
+# Console colors for output
+RESET = "\033[0m"
+RED = "\033[31m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+CYAN = "\033[36m"
+
+
+# =============================================================================
+# Dependencies Data Class
+# =============================================================================
+
+
+@dataclass
+class ArchiveDependencies:
+    """Dependencies injected into agent tools."""
+
+    service: any  # Google Drive service
+    file_id: str
+    file_name: str
+    file_path: str
+    classification_result: any
+
+
+# =============================================================================
+# Utility Functions
+# =============================================================================
+
+
+def create_drive_service():
+    """
+    Creates and returns an authenticated Google Drive API service object.
+
+    Returns:
+        The authenticated Google Drive API service object
+    """
+
+    creds = Credentials.from_service_account_file(
+        SERVICE_ACCOUNT_KEY_PATH, scopes=DRIVE_API_SCOPES
+    )
+    delegated_creds = creds.with_subject(IMPERSONATED_EMAIL)
+    return build("drive", "v3", credentials=delegated_creds)
+    # return build("drive", "v3", credentials=creds)
+
+
+def download_file(
+    service, file_id: str, file_name: str, destination_folder: str = "/tmp"
+) -> str | None:
+    """
+    Downloads a file from Google Drive by its ID.
+
+    Args:
+        service: The authenticated Google Drive API service object
+        file_id: The ID of the file to download
+        file_name: The name of the file (used for saving)
+        destination_folder: The folder to save the downloaded file
+
+    Returns:
+        The path to the downloaded file if successful, None otherwise
+    """
+    try:
+        request = service.files().get_media(fileId=file_id)
+        # Sanitize filename by replacing "/" with "_" to avoid invalid paths
+        sanitized_file_name = file_name.replace("/", "_")
+        file_path = f"{destination_folder}/{sanitized_file_name}"
+        with open(file_path, "wb") as fh:
+            downloader = MediaIoBaseDownload(fh, request)
+            done = False
+            while done is False:
+                _, done = downloader.next_chunk()
+        return file_path
+    except HttpError as error:
+        print(f"{RED}An error occurred downloading file: {error}{RESET}")
+        return None
+
+
+def find_pdf_documents(service, parent_folder_id: str) -> tuple[list[str], list[str]]:
+    """
+    Searches for PDF documents in a specific folder.
+
+    Args:
+        service: The authenticated Google Drive API service object
+        parent_folder_id: The ID of the folder to search in
+
+    Returns:
+        A list of file IDs for PDF documents found in the folder
+    """
+    try:
+        files = []
+        names = []
+        page_token = None
+        while True:
+            response = (
+                service.files()
+                .list(
+                    q=f"'{parent_folder_id}' in parents and mimeType = 'application/pdf'",
+                    spaces="drive",
+                    fields="nextPageToken, files(id, name)",
+                    pageToken=page_token,
+                )
+                .execute()
+            )
+
+            for file in response.get("files", []):
+                files.append(file.get("id"))
+                names.append(file.get("name"))
+
+            page_token = response.get("nextPageToken", None)
+            if page_token is None:
+                break
+
+        return files, names
+
+    except HttpError as error:
+        print(f"{RED}An error occurred: {error}{RESET}")
+        return []
+
+
+def create_or_get_folder(
+    service, folder_name: str, parent_id: str | None = None
+) -> str:
+    """
+    Creates a folder if it doesn't exist or retrieves its ID if it already exists.
+
+    Args:
+        service: The authenticated Google Drive API service object
+        folder_name: The name of the folder
+        parent_id: The ID of the parent folder
+
+    Returns:
+        The ID of the created or retrieved folder
+    """
+    query = f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder'"
+    if parent_id:
+        query += f" and '{parent_id}' in parents"
+
+    response = service.files().list(q=query, fields="files(id)").execute()
+    folders = response.get("files", [])
+
+    if folders:
+        return folders[0]["id"]
+
+    file_metadata = {
+        "name": folder_name,
+        "mimeType": "application/vnd.google-apps.folder",
+    }
+    if parent_id:
+        file_metadata["parents"] = [parent_id]
+
+    folder = service.files().create(body=file_metadata, fields="id").execute()
+    return folder["id"]
+
+
+def create_folder_path(service, path_parts: list[str], root_folder_id: str) -> str:
+    """
+    Creates a folder structure based on a list of folder names.
+
+    Args:
+        service: The authenticated Google Drive API service object
+        path_parts: A list of folder names representing the path
+        root_folder_id: The ID of the root folder
+
+    Returns:
+        The ID of the deepest created folder
+    """
+    parent_folder_id = root_folder_id
+    for folder_name in path_parts:
+        parent_folder_id = create_or_get_folder(
+            service, folder_name, parent_id=parent_folder_id
+        )
+    return parent_folder_id
+
+
+def initialize_folder_structure(service) -> dict[str, str]:
+    """
+    Initialize the folder structure under ROOT_FOLDER_ID.
+    Creates the following folders if they don't exist:
+    - Drop: for incoming documents
+    - Invalidos: for unclassified documents
+    - Irrelevantes: for left behind documents
+    - (Year folders are created as needed by the archiving process)
+
+    Args:
+        service: The authenticated Google Drive API service object
+
+    Returns:
+        A dictionary with folder IDs: {
+            'drop': drop_folder_id,
+            'unclassified': unclassified_folder_id,
+            'left_behind': left_behind_folder_id,
+            'archive_root': ROOT_FOLDER_ID
+        }
+    """
+    print(f"{CYAN}Initializing folder structure under ROOT_FOLDER_ID...{RESET}")
+
+    drop_folder_id = create_or_get_folder(service, "Drop", parent_id=ROOT_FOLDER_ID)
+    print(f"{GREEN}✓ Drop folder ready: {drop_folder_id}{RESET}")
+
+    unclassified_folder_id = create_or_get_folder(
+        service, "Invalidos", parent_id=ROOT_FOLDER_ID
+    )
+    print(f"{GREEN}✓ Invalidos folder ready: {unclassified_folder_id}{RESET}")
+
+    left_behind_folder_id = create_or_get_folder(
+        service, "Irrelevantes", parent_id=ROOT_FOLDER_ID
+    )
+    print(f"{GREEN}✓ Irrelevantes folder ready: {left_behind_folder_id}{RESET}")
+
+    return {
+        "drop": drop_folder_id,
+        "unclassified": unclassified_folder_id,
+        "left_behind": left_behind_folder_id,
+        "archive_root": ROOT_FOLDER_ID,
+    }
+
+
+def format_classification_to_text(classification_result) -> str:
+    """
+    Format classification result to a human-readable text format with key: value pairs.
+
+    Args:
+        classification_result: The classification result object
+
+    Returns:
+        A formatted string with all classification data
+    """
+    lines = []
+    lines.append("=" * 80)
+    lines.append("CLASSIFICATION RESULTS")
+    lines.append("=" * 80)
+    lines.append("")
+
+    if classification_result is None:
+        lines.append("Status: CLASSIFICATION FAILED")
+        return "\n".join(lines)
+
+    # Check for error
+    if hasattr(classification_result, "erro"):
+        lines.append(f"Status: ERROR")
+        lines.append(f"Error: {classification_result.erro}")
+        return "\n".join(lines)
+
+    # Main classification fields
+    if hasattr(classification_result, "grupo_documento"):
+        lines.append(f"Grupo Documento: {classification_result.grupo_documento}")
+    if hasattr(classification_result, "tipo_documento"):
+        lines.append(f"Tipo Documento: {classification_result.tipo_documento}")
+    if hasattr(classification_result, "data_emissao"):
+        lines.append(f"Data Emissao: {classification_result.data_emissao}")
+    if hasattr(classification_result, "localizacao_ficheiro"):
+        lines.append(
+            f"Localizacao Ficheiro: {classification_result.localizacao_ficheiro}"
+        )
+    if hasattr(classification_result, "notas_triagem"):
+        lines.append(f"Notas Triagem: {classification_result.notas_triagem}")
+
+    # Metadata section
+    if (
+        hasattr(classification_result, "metadados_documento")
+        and classification_result.metadados_documento
+    ):
+        lines.append("")
+        lines.append("-" * 80)
+        lines.append("METADATA")
+        lines.append("-" * 80)
+
+        metadata = classification_result.metadados_documento
+
+        # Iterate through all attributes of metadata
+        for attr in dir(metadata):
+            if not attr.startswith("_") and not callable(getattr(metadata, attr)):
+                value = getattr(metadata, attr, None)
+                if value is not None:
+                    lines.append(f"{attr}: {value}")
+
+    lines.append("")
+    lines.append("=" * 80)
+
+    return "\n".join(lines)
+
+
+def upload_text_file_to_drive(
+    service, content: str, file_name: str, parent_folder_id: str
+) -> str:
+    """
+    Upload a text file to Google Drive.
+
+    Args:
+        service: The authenticated Google Drive API service object
+        content: The text content to upload
+        file_name: The name for the file
+        parent_folder_id: The ID of the parent folder
+
+    Returns:
+        The ID of the uploaded file
+    """
+    file_metadata = {
+        "name": file_name,
+        "parents": [parent_folder_id],
+        "mimeType": "text/plain",
+    }
+
+    media = MediaIoBaseUpload(
+        BytesIO(content.encode("utf-8")), mimetype="text/plain", resumable=True
+    )
+
+    file = (
+        service.files()
+        .create(body=file_metadata, media_body=media, fields="id")
+        .execute()
+    )
+
+    return file.get("id")
+
+
+# =============================================================================
+# Pydantic AI Agent Definition
+# =============================================================================
+
+# Create the agent using Google's Gemini model
+archive_agent = Agent(
+    "gemini-2.5-flash",
+    deps_type=ArchiveDependencies,
+    retries=2,
+)
+
+
+@archive_agent.system_prompt
+def archive_system_prompt() -> str:
+    """System prompt that defines the agent's role and decision-making rules."""
+    return f"""You are a document archiving specialist for a multi-company organization.
+
+Your task is to analyze classified documents and decide how to archive them based on the following rules:
+
+**OUR COMPANY IDENTIFIERS**:
+- Company Fiscal ID (NIF): {COMPANY_FISCAL_ID}
+- Company Name: {COMPANY_NAME}
+
+**DOCUMENT GROUPS AND ARCHIVING RULES**:
+
+1. **DOCUMENTOS_COMERCIAIS (Commercial Documents)**:
+   - If document type is FACTURA_PRO_FORMA: move_to_unclassified
+   - Check if nif_emitente == {COMPANY_FISCAL_ID}: We are the vendor
+     - RECIBO: Archive to: {{year}}/{{year-month}}/[Facturas - Recibos - Clientes]
+     - Other types:  Archive to: {{year}}/{{year-month}}/[Facturas - Clientes]
+     - Filename: {{date}} - {{document_type}} {{document_number}}.pdf
+   - Check if nif_cliente == {COMPANY_FISCAL_ID}: We are the client
+     - RECIBOS: Archive to: {{year}}/{{year-month}}/Recibos - Fornecedores]
+     - Other types: Archive to: {{year}}/{{year-month}}/[Facturas - Fornecedores]
+     - Filename: {{date}} - {{vendor_name}} - {{document_type}} {{document_number}}.pdf
+   - If neither matches: move_to_unclassified
+
+2. **DOCUMENTOS_ADUANEIROS (Customs Documents)**:
+   - NOTA_LIQUIDACAO:
+     - copy_to_folder to {{year}}/{{year-month}}/Impostos
+       - Copy filename: {{date}} - {{document_type}} {{document_number}}.pdf
+     - move_to_left_behind
+       - Left behind filename: {{date}} - {{document_type}} {{document_number}}.pdf
+   - RECIBO:
+     - copy_to_folder to {{year}}/{{year-month}}/Impostos - Liquidacoes
+       - Copy filename: {{date}} - {{document_type}} {{document_number}}.pdf
+     - move_to_left_behind
+       - Left behind filename: {{date}} - {{document_type}} {{document_number}}.pdf
+   - Other types: move_to_left_behind
+     - Filename: {{date}} - {{document_type}} {{document_number}}.pdf
+
+3. **DOCUMENTOS_FISCAIS (Tax Documents)**:
+   - Check if nif_contribuinte == {COMPANY_FISCAL_ID} or nome_contribuinte matches "{COMPANY_NAME}"
+   - If yes:
+     - Archive to: {{year}}/{{year-month}}/Impostos
+     - Filename: {{date}} - {{document_type}} {{document_number}}.pdf
+   - Otherwise: move_to_unclassified
+
+4. **DOCUMENTOS_BANCARIOS (Banking Documents)**:
+   - Archive to: {{year}}/{{year-month}}/Bancos
+   - Filename: {{date}} - {{document_type}} {{document_number}}.pdf
+
+5. **DOCUMENTOS_FRETE (Freight Documents)**:
+   - Filename: {{date}} - {{document_type}} {{document_number}}.pdf
+   - Then move_to_left_behind (do not use move_to_unclassified)
+
+6. **DOCUMENTOS_RH (Human Resources Documents)**:
+   - FOLHA_REMUNERACAO:
+     - Filename: Salarios {{mes_referencia}}.pdf
+     - Archive to: {{year}}/{{year-month}}/Salarios
+   - Other types: move_to_left_behind
+     - Filename: {{date}} - {{document_type}} {{document_number}}.pdf
+
+7. **OUTROS_DOCUMENTOS (Other Documents)**:
+   - Always: move_to_unclassified
+
+**DECISION PROCESS**:
+1. Analyze the classification result including document group and metadata
+2. Compare document identifiers (NIF, company names) against our company identifiers
+3. Determine which archiving rule applies based on document type and company match
+4. Decide on appropriate filenames based on the document type and metadata
+5. Call the appropriate tool(s) to archive the document
+6. Provide a brief explanation of your decision
+
+**IMPORTANT**:
+- Use copy_to_folder when document needs to be in multiple locations
+- Use move_to_folder for standard archiving
+- Use move_to_unclassified when document cannot be classified or doesn't match our company
+- You decide the final filename - make it descriptive and follow the patterns shown in the rules
+- Handle special characters in filenames appropriately for filesystem compatibility
+- Always compare NIFs and company names against our company identifiers to ensure documents belong to us
+- In Angola company names often have the company activity scope and legal status, for example: Zafir - Tecnologia, Lda
+  - When it is present in company's name, just remove it. example: Ubiquus - Representacoes, Lda ==> Ubiquus
+"""
+
+
+@archive_agent.tool
+def move_to_unclassified(ctx: RunContext[ArchiveDependencies], reason: str) -> str:
+    """
+    Move a document to the unclassified folder when it cannot be properly archived.
+    Also creates a text file with the classification results.
+
+    Args:
+        ctx: The run context with dependencies
+        reason: The reason why the document is being moved to unclassified
+
+    Returns:
+        A confirmation message
+    """
+    service = ctx.deps.service
+    file_id = ctx.deps.file_id
+    file_name = ctx.deps.file_name
+    classification_result = ctx.deps.classification_result
+
+    print(f"\n{RED}Moving [{file_name}] to unclassified folder:\n{reason}{RESET}")
+
+    # Move the file
+    file = service.files().get(fileId=file_id, fields="id, name, parents").execute()
+    parents = file.get("parents")
+    previous_parents = ",".join(parents)
+
+    service.files().update(
+        fileId=file_id,
+        body={"name": file.get("name")},
+        addParents=UNCLASSIFIED_FOLDER_ID,
+        removeParents=previous_parents,
+        fields="id, parents",
+    ).execute()
+
+    # Create and upload classification results text file
+    try:
+        # Generate the text file name (replace .pdf with _results.txt)
+        base_name = file_name.rsplit(".", 1)[0] if "." in file_name else file_name
+        results_file_name = f"{base_name}_results.txt"
+
+        # Format classification results
+        results_content = format_classification_to_text(classification_result)
+        results_content += f"\n\nReason for unclassified: {reason}\n"
+
+        # Upload the text file to the same folder
+        upload_text_file_to_drive(
+            service, results_content, results_file_name, UNCLASSIFIED_FOLDER_ID
+        )
+
+        print(f"{RED}Classification results file created{RESET}")
+    except Exception as e:
+        print(f"{YELLOW}Warning: Could not create results file: {e}{RESET}")
+
+    print(f"{RED}Done...{RESET}")
+
+    return f"Moved to unclassified folder: {reason}"
+
+
+@archive_agent.tool
+def move_to_folder(
+    ctx: RunContext[ArchiveDependencies], path: str, new_name: str | None = None
+) -> str:
+    """
+    Move a document to a specific folder path (relative to ARCHIVE_ROOT_FOLDER_ID for year-based organization).
+
+    Args:
+        ctx: The run context with dependencies
+        path: The folder path relative to archive root (e.g., "2024/2024-01/Impostos")
+        new_name: Optional new name for the file (should include .pdf extension)
+
+    Returns:
+        A confirmation message
+    """
+    service = ctx.deps.service
+    file_id = ctx.deps.file_id
+    file_name = ctx.deps.file_name
+
+    print(f"\n{GREEN}Moving to: {path}/{new_name if new_name else ''}{RESET}")
+
+    # Parse the path and create folder structure under ARCHIVE_ROOT_FOLDER_ID (which is ROOT_FOLDER_ID)
+    path_parts = path.split("/")
+    parent_folder_id = create_folder_path(service, path_parts, ARCHIVE_ROOT_FOLDER_ID)
+
+    # Get current file info
+    file = service.files().get(fileId=file_id, fields="name, parents").execute()
+    previous_parents = ",".join(file.get("parents"))
+
+    # Prepare the new name
+    final_name = new_name if new_name else file.get("name")
+
+    # Move the file
+    service.files().update(
+        fileId=file_id,
+        body={"name": final_name},
+        addParents=parent_folder_id,
+        removeParents=previous_parents,
+        fields="id, parents",
+    ).execute()
+
+    print(f"{GREEN}Done...{RESET}")
+
+    return f"Document moved to {path} as {final_name}"
+
+
+@archive_agent.tool
+def copy_to_folder(
+    ctx: RunContext[ArchiveDependencies], path: str, new_name: str | None = None
+) -> str:
+    """
+    Copy a document to a specific folder path (relative to ARCHIVE_ROOT_FOLDER_ID for year-based organization).
+    The original file remains in its current location.
+
+    Args:
+        ctx: The run context with dependencies
+        path: The folder path relative to archive root (e.g., "2024/2024-01/Frete")
+        new_name: Optional new name for the copied file (should include .pdf extension)
+
+    Returns:
+        A confirmation message
+    """
+    service = ctx.deps.service
+    file_id = ctx.deps.file_id
+    file_name = ctx.deps.file_name
+
+    print(f"\n{GREEN}Copying to: {path}/{new_name if new_name else ''}{RESET}")
+
+    # Parse the path and create folder structure under ARCHIVE_ROOT_FOLDER_ID (which is ROOT_FOLDER_ID)
+    path_parts = path.split("/")
+    parent_folder_id = create_folder_path(service, path_parts, ARCHIVE_ROOT_FOLDER_ID)
+
+    # Get current file info
+    file = service.files().get(fileId=file_id, fields="name").execute()
+    final_name = new_name if new_name else file.get("name")
+
+    # Copy the file
+    copied_file = (
+        service.files()
+        .copy(fileId=file_id, body={"name": final_name, "parents": [parent_folder_id]})
+        .execute()
+    )
+
+    print(f"{GREEN}File {file_id} copied to {path} as {final_name}{RESET}")
+    return (
+        f"Document copied to {path} as {final_name} (copy ID: {copied_file.get('id')})"
+    )
+
+
+@archive_agent.tool
+def move_to_left_behind(
+    ctx: RunContext[ArchiveDependencies], path: str, new_name: str | None = None
+) -> str:
+    """
+    Move a document to the left behind folder organized by year/month for documents that need additional review or processing.
+
+    Args:
+        ctx: The run context with dependencies
+        path: The folder path relative to LEFT_BEHIND_FOLDER_ID (e.g., "2024/2024-01")
+        new_name: Optional new name for the file (should include .pdf extension)
+
+    Returns:
+        A confirmation message
+    """
+    service = ctx.deps.service
+    file_id = ctx.deps.file_id
+    file_name = ctx.deps.file_name
+
+    print(
+        f"\n{CYAN}Moving to left behind folder: {path}/{new_name if new_name else ''}{RESET}"
+    )
+
+    # Parse the path and create folder structure under LEFT_BEHIND_FOLDER_ID
+    path_parts = path.split("/")
+    parent_folder_id = create_folder_path(service, path_parts, LEFT_BEHIND_FOLDER_ID)
+
+    # Get current file info
+    file = service.files().get(fileId=file_id, fields="name, parents").execute()
+    previous_parents = ",".join(file.get("parents"))
+
+    # Prepare the new name
+    final_name = new_name if new_name else file.get("name")
+
+    # Move to left behind folder
+    service.files().update(
+        fileId=file_id,
+        body={"name": final_name},
+        addParents=parent_folder_id,
+        removeParents=previous_parents,
+        fields="id, parents",
+    ).execute()
+
+    print(f"{GREEN}Done...{RESET}")
+    return f"Document moved to left behind folder {path} as {final_name}"
+
+
+# =============================================================================
+# Main Execution
+# =============================================================================
+
+
+def process_document(
+    service, file_id: str, file_name: str, destination_folder: str = "/tmp"
+):
+    """
+    Processes a document by downloading and classifying it.
+
+    Args:
+        service: The authenticated Google Drive API service object
+        file_id: The ID of the document to process
+        file_name: The name of the file
+        destination_folder: The folder to save downloaded files
+
+    Returns:
+        The classification result or None if classification failed
+    """
+    file_path = None
+    try:
+        file_path = download_file(service, file_id, file_name, destination_folder)
+
+        if file_path:
+            result = classify_document(file_path)
+
+            # Delete the temporary file after classification
+            try:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+            except Exception as e:
+                print(
+                    f"{YELLOW}Warning: Could not delete temporary file {file_path}: {e}{RESET}"
+                )
+
+            return result
+    except Exception as error:
+        print(f"{RED}An error occurred during classification: {error}{RESET}")
+        # Attempt cleanup on error
+        if file_path and os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except Exception:
+                pass
+        return None
+
+
+def archive_with_agent(
+    service, file_id: str, file_name: str, classification_result, file_path: str
+):
+    """
+    Uses the Pydantic AI agent to make archiving decisions.
+
+    Args:
+        service: The Google Drive service
+        file_id: The file ID
+        classification_result: The classification result from classify_document
+        file_path: The path to the downloaded file
+    """
+    # Prepare dependencies for the agent
+    deps = ArchiveDependencies(
+        service=service,
+        file_id=file_id,
+        file_name=file_name,
+        file_path=file_path,
+        classification_result=classification_result,
+    )
+
+    # Handle error cases upfront - use the agent tool
+    if classification_result is None:
+        # Call the agent tool directly through a minimal agent run
+        try:
+            result = archive_agent.run_sync(
+                "The document failed to classify. Move it to unclassified with reason: 'Failed to classify document'",
+                deps=deps,
+            )
+            print(f"{RED}\nAgent decision: {result.output}{RESET}")
+        except Exception as e:
+            print(f"{RED}Agent error (classification result is None): {e}{RESET}")
+            traceback.print_exc()
+
+        return
+
+    # Check if classification returned an error by looking for 'erro' attribute
+    if hasattr(classification_result, "erro"):
+        try:
+            result = archive_agent.run_sync(
+                f"The document classification returned an error. Move it to unclassified with reason: 'Classification error: {classification_result.erro}'",
+                deps=deps,
+            )
+            print(f"{RED}\nAgent decision: {result.output}{RESET}")
+        except Exception as e:
+            print(f"{RED}Agent error (classification result has error): {e}{RESET}")
+            traceback.print_exc()
+        return
+
+    # Create a detailed prompt for the agent
+    prompt = f"""Analyze and archive this document:
+
+**Classification Result**:
+- Document Group: {classification_result.grupo_documento}
+- Document Type: {getattr(classification_result, "tipo_documento", "N/A")}
+- Issue Date: {getattr(classification_result, "data_emissao", "N/A")}
+- Document Number: {getattr(classification_result, "numero_documento", "N/A")}
+
+**Metadata**:
+{format_metadata(classification_result)}
+
+Based on the archiving rules in your system prompt, determine the appropriate archiving action(s) and execute them.
+"""
+
+    # Run the agent
+    try:
+        archive_agent.run_sync(prompt, deps=deps)
+    except Exception as e:
+        print(f"{RED}Agent error when trying to archive document: {e}{RESET}")
+        traceback.print_exc()
+        # On agent error, try to move to unclassified using the tool
+        try:
+            result = archive_agent.run_sync(
+                f"There was an agent error. Move the document to unclassified with reason: 'Agent error: {str(e)}'",
+                deps=deps,
+            )
+        except Exception as e2:
+            print(f"{RED}Failed to move to unclassified: {e2}{RESET}")
+
+
+def format_metadata(classification_result) -> str:
+    """Format metadata for display in the agent prompt."""
+    if not hasattr(classification_result, "metadados_documento"):
+        return "No metadata available"
+
+    metadata = classification_result.metadados_documento
+    lines = []
+
+    # Common fields
+    if hasattr(metadata, "nif_emitente"):
+        lines.append(f"- Issuer Tax ID: {metadata.nif_emitente}")
+    if hasattr(metadata, "nome_emitente"):
+        lines.append(f"- Issuer Name: {metadata.nome_emitente}")
+    if hasattr(metadata, "nif_cliente"):
+        lines.append(f"- Client Tax ID: {metadata.nif_cliente}")
+    if hasattr(metadata, "nome_cliente"):
+        lines.append(f"- Client Name: {metadata.nome_cliente}")
+    if hasattr(metadata, "nif_contribuinte"):
+        lines.append(f"- Taxpayer ID: {metadata.nif_contribuinte}")
+    if hasattr(metadata, "nome_contribuinte"):
+        lines.append(f"- Taxpayer Name: {metadata.nome_contribuinte}")
+
+    return "\n".join(lines) if lines else "No metadata available"
+
+
+def main():
+    """
+    Main function that executes the document classification and archiving workflow.
+    """
+    global \
+        DROP_FOLDER_ID, \
+        UNCLASSIFIED_FOLDER_ID, \
+        LEFT_BEHIND_FOLDER_ID, \
+        ARCHIVE_ROOT_FOLDER_ID
+
+    # Create the Drive service
+    service = create_drive_service()
+
+    # Initialize folder structure
+    folder_ids = initialize_folder_structure(service)
+    DROP_FOLDER_ID = folder_ids["drop"]
+    UNCLASSIFIED_FOLDER_ID = folder_ids["unclassified"]
+    LEFT_BEHIND_FOLDER_ID = folder_ids["left_behind"]
+    ARCHIVE_ROOT_FOLDER_ID = folder_ids["archive_root"]
+
+    print(f"\n{CYAN}Folder structure initialized{RESET}")
+
+    # Scan for PDF documents
+    file_ids, file_names = find_pdf_documents(service, DROP_FOLDER_ID)  # pyright: ignore[reportArgumentType]
+    print(f"{GREEN}Found {len(file_ids)} PDF documents in the drop folder.{RESET}")
+
+    # Process each document
+    for file_id, file_name in zip(file_ids, file_names):
+        print(f"\n{CYAN}Processing file: {file_name}{RESET}")
+        print(f"{CYAN}{'=' * 95}{RESET}")
+
+        # Download and classify
+        classification_result = process_document(service, file_id, file_name)
+
+        if classification_result is None:
+            print(f"{RED}Failed to classify document: {file_id}{RESET}")
+            continue
+
+        print(f"\nName:\t{classification_result.localizacao_ficheiro}")
+        print(f"Numero:\t{getattr(classification_result, 'numero_documento', 'N/A')}")
+        print(f"Grupo:\t{getattr(classification_result, 'grupo_documento', 'N/A')}")
+        print(f"Tipo:\t{getattr(classification_result, 'tipo_documento', 'N/A')}")
+        print(f"Notas:\t{getattr(classification_result, 'notas_triagem', 'N/A')}\n")
+
+        # Archive using AI agent
+        file_path = f"/tmp/{file_name}"
+        archive_with_agent(
+            service, file_id, file_name, classification_result, file_path
+        )
+
+
+if __name__ == "__main__":
+    main()
