@@ -33,8 +33,8 @@ powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 
 ```bash
 # Clone the repository
-git clone https://github.com/zafir-co-ao/agentic_archive.git
-cd agentic_archive
+git clone git@github.com:kindalus/agentic_document_archiver.git
+cd agentic_document_archiver
 
 # Create a virtual environment and install the package
 uv venv
@@ -54,7 +54,10 @@ uv pip install -e ".[dev]"
 
 ```bash
 # Install from local directory
-uv pip install /path/to/agentic_archive
+uv pip install /path/to/agentic_document_archiver
+
+# Or install directly from GitHub
+uv pip install git+https://github.com/kindalus/agentic_document_archiver.git
 
 # Or if published to PyPI (future)
 uv pip install agentic-archive
@@ -179,13 +182,15 @@ uv pip sync requirements.txt
 ## Project Structure
 
 ```
-agentic_archive/
+agentic_document_archiver/
 ├── agentic_archive/
 │   ├── __init__.py           # Package initialization
 │   └── archive_docs.py       # Main application logic
 ├── pyproject.toml            # Project configuration and dependencies
 ├── README.md                 # This file
-└── .env.example              # Example environment configuration
+├── .env.example              # Example environment configuration
+├── .gitignore                # Git ignore rules
+└── uv.lock                   # Dependency lock file
 ```
 
 ## How It Works
@@ -243,4 +248,9 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## Support
 
-For issues and questions, please open an issue on the GitHub repository.
+For issues and questions, please open an issue on the [GitHub repository](https://github.com/kindalus/agentic_document_archiver/issues).
+
+## Repository
+
+- **GitHub**: https://github.com/kindalus/agentic_document_archiver
+- **Clone**: `git clone git@github.com:kindalus/agentic_document_archiver.git`
