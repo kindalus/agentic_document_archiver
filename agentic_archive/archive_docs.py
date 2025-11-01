@@ -7,8 +7,6 @@ and organize them into appropriate folder structures based on their metadata.
 
 import os
 import traceback
-import json
-from dataclasses import dataclass
 from io import BytesIO
 from typing import Optional, Literal
 from pydantic import BaseModel
@@ -93,22 +91,6 @@ class ArchiveDecision(BaseModel):
 
     actions: list[ArchiveAction]
     summary: str
-
-
-# =============================================================================
-# Dependencies Data Class
-# =============================================================================
-
-
-@dataclass
-class ArchiveContext:
-    """Context for archiving operations."""
-
-    service: any  # Google Drive service
-    file_id: str
-    file_name: str
-    file_path: str
-    classification_result: any
 
 
 # =============================================================================
@@ -343,9 +325,9 @@ def format_classification_to_text(classification_result) -> str:
         and classification_result.metadados_documento
     ):
         lines.append("")
-        lines.append("-" * 80)
+        lines.append("-" * 90)
         lines.append("METADATA")
-        lines.append("-" * 80)
+        lines.append("-" * 90)
 
         metadata = classification_result.metadados_documento
 
@@ -357,7 +339,7 @@ def format_classification_to_text(classification_result) -> str:
                     lines.append(f"{attr}: {value}")
 
     lines.append("")
-    lines.append("=" * 80)
+    lines.append("=" * 90)
 
     return "\n".join(lines)
 
@@ -397,22 +379,23 @@ def upload_text_file_to_drive(
 # =============================================================================
 
 
-def move_to_unclassified(ctx: ArchiveContext, reason: str) -> str:
+def move_to_unclassified(
+    service, file_id: str, file_name: str, classification_result, reason: str
+) -> str:
     """
     Move a document to the unclassified folder when it cannot be properly archived.
     Also creates a text file with the classification results.
 
     Args:
-        ctx: The archive context
+        service: The authenticated Google Drive API service object
+        file_id: The ID of the file to move
+        file_name: The name of the file
+        classification_result: The classification result object
         reason: The reason why the document is being moved to unclassified
 
     Returns:
         A confirmation message
     """
-    service = ctx.service
-    file_id = ctx.file_id
-    file_name = ctx.file_name
-    classification_result = ctx.classification_result
 
     print(f"\n{RED}Moving [{file_name}] to unclassified folder:\n{reason}{RESET}")
 
@@ -453,21 +436,22 @@ def move_to_unclassified(ctx: ArchiveContext, reason: str) -> str:
     return f"Moved to unclassified folder: {reason}"
 
 
-def move_to_folder(ctx: ArchiveContext, path: str, new_name: str | None = None) -> str:
+def move_to_folder(
+    service, file_id: str, file_name: str, path: str, new_name: str | None = None
+) -> str:
     """
     Move a document to a specific folder path (relative to ARCHIVE_ROOT_FOLDER_ID for year-based organization).
 
     Args:
-        ctx: The archive context
+        service: The authenticated Google Drive API service object
+        file_id: The ID of the file to move
+        file_name: The name of the file
         path: The folder path relative to archive root (e.g., "2024/2024-01/Impostos")
         new_name: Optional new name for the file (should include .pdf extension)
 
     Returns:
         A confirmation message
     """
-    service = ctx.service
-    file_id = ctx.file_id
-    file_name = ctx.file_name
 
     print(f"\n{GREEN}Moving to: {path}/{new_name if new_name else ''}{RESET}")
 
@@ -496,22 +480,23 @@ def move_to_folder(ctx: ArchiveContext, path: str, new_name: str | None = None) 
     return f"Document moved to {path} as {final_name}"
 
 
-def copy_to_folder(ctx: ArchiveContext, path: str, new_name: str | None = None) -> str:
+def copy_to_folder(
+    service, file_id: str, file_name: str, path: str, new_name: str | None = None
+) -> str:
     """
     Copy a document to a specific folder path (relative to ARCHIVE_ROOT_FOLDER_ID for year-based organization).
     The original file remains in its current location.
 
     Args:
-        ctx: The archive context
+        service: The authenticated Google Drive API service object
+        file_id: The ID of the file to copy
+        file_name: The name of the file
         path: The folder path relative to archive root (e.g., "2024/2024-01/Frete")
         new_name: Optional new name for the copied file (should include .pdf extension)
 
     Returns:
         A confirmation message
     """
-    service = ctx.service
-    file_id = ctx.file_id
-    file_name = ctx.file_name
 
     print(f"\n{GREEN}Copying to: {path}/{new_name if new_name else ''}{RESET}")
 
@@ -534,21 +519,22 @@ def copy_to_folder(ctx: ArchiveContext, path: str, new_name: str | None = None) 
     return f"Document copied to {path} as {final_name} (copy ID: {copied_file.get('id')})"
 
 
-def move_to_left_behind(ctx: ArchiveContext, path: str, new_name: str | None = None) -> str:
+def move_to_left_behind(
+    service, file_id: str, file_name: str, path: str, new_name: str | None = None
+) -> str:
     """
     Move a document to the left behind folder organized by year/month for documents that need additional review or processing.
 
     Args:
-        ctx: The archive context
+        service: The authenticated Google Drive API service object
+        file_id: The ID of the file to move
+        file_name: The name of the file
         path: The folder path relative to LEFT_BEHIND_FOLDER_ID (e.g., "2024/2024-01")
         new_name: Optional new name for the file (should include .pdf extension)
 
     Returns:
         A confirmation message
     """
-    service = ctx.service
-    file_id = ctx.file_id
-    file_name = ctx.file_name
 
     print(
         f"\n{CYAN}Moving to left behind folder: {path}/{new_name if new_name else ''}{RESET}"
@@ -681,12 +667,14 @@ Return a JSON object with the following structure:
 """
 
 
-def archive_with_ai(ctx: ArchiveContext, classification_result) -> None:
+def archive_with_ai(service, file_id: str, file_name: str, classification_result) -> None:
     """
     Uses Google AI to make archiving decisions and execute them.
 
     Args:
-        ctx: The archive context
+        service: The authenticated Google Drive API service object
+        file_id: The ID of the file to archive
+        file_name: The name of the file
         classification_result: The classification result from classify_document
     """
     # Initialize Google AI client
@@ -694,12 +682,20 @@ def archive_with_ai(ctx: ArchiveContext, classification_result) -> None:
 
     # Handle error cases upfront
     if classification_result is None:
-        move_to_unclassified(ctx, "Failed to classify document")
+        move_to_unclassified(
+            service, file_id, file_name, classification_result, "Failed to classify document"
+        )
         return
 
     # Check if classification returned an error
     if hasattr(classification_result, "erro"):
-        move_to_unclassified(ctx, f"Classification error: {classification_result.erro}")
+        move_to_unclassified(
+            service,
+            file_id,
+            file_name,
+            classification_result,
+            f"Classification error: {classification_result.erro}",
+        )
         return
 
     # Create a detailed prompt for the AI
@@ -720,7 +716,7 @@ Based on the archiving rules in your system prompt, determine the appropriate ar
     try:
         # Call Google AI with structured output
         response = client.models.generate_content(
-            model="gemini-2.0-flash-exp",
+            model="gemini-2.5-flash",
             contents=prompt,
             config=types.GenerateContentConfig(
                 system_instruction=get_archive_system_prompt(),
@@ -735,7 +731,13 @@ Based on the archiving rules in your system prompt, determine the appropriate ar
 
         if not decision or not decision.actions:
             print(f"{YELLOW}No actions returned from AI, moving to unclassified{RESET}")
-            move_to_unclassified(ctx, "AI returned no archiving actions")
+            move_to_unclassified(
+                service,
+                file_id,
+                file_name,
+                classification_result,
+                "AI returned no archiving actions",
+            )
             return
 
         print(f"\n{CYAN}AI Decision Summary: {decision.summary}{RESET}")
@@ -745,20 +747,28 @@ Based on the archiving rules in your system prompt, determine the appropriate ar
             print(f"\n{CYAN}Executing: {action.action} - {action.explanation}{RESET}")
 
             if action.action == "move_to_folder":
-                move_to_folder(ctx, action.path, action.new_name)
+                move_to_folder(service, file_id, file_name, action.path, action.new_name)
             elif action.action == "copy_to_folder":
-                copy_to_folder(ctx, action.path, action.new_name)
+                copy_to_folder(service, file_id, file_name, action.path, action.new_name)
             elif action.action == "move_to_left_behind":
-                move_to_left_behind(ctx, action.path, action.new_name)
+                move_to_left_behind(service, file_id, file_name, action.path, action.new_name)
             elif action.action == "move_to_unclassified":
-                move_to_unclassified(ctx, action.reason or "Unclassified by AI")
+                move_to_unclassified(
+                    service,
+                    file_id,
+                    file_name,
+                    classification_result,
+                    action.reason or "Unclassified by AI",
+                )
 
     except Exception as e:
         print(f"{RED}AI error when trying to archive document: {e}{RESET}")
         traceback.print_exc()
         # On AI error, move to unclassified
         try:
-            move_to_unclassified(ctx, f"AI error: {str(e)}")
+            move_to_unclassified(
+                service, file_id, file_name, classification_result, f"AI error: {str(e)}"
+            )
         except Exception as e2:
             print(f"{RED}Failed to move to unclassified: {e2}{RESET}")
 
@@ -879,15 +889,7 @@ def main():
         print(f"Notas:\t{getattr(classification_result, 'notas_triagem', 'N/A')}\n")
 
         # Archive using Google AI
-        file_path = f"/tmp/{file_name}"
-        ctx = ArchiveContext(
-            service=service,
-            file_id=file_id,
-            file_name=file_name,
-            file_path=file_path,
-            classification_result=classification_result,
-        )
-        archive_with_ai(ctx, classification_result)
+        archive_with_ai(service, file_id, file_name, classification_result)
 
 
 if __name__ == "__main__":
