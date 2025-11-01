@@ -379,16 +379,13 @@ def upload_text_file_to_drive(
 # =============================================================================
 
 
-def move_to_unclassified(
-    file_id: str, file_name: str, classification_result, reason: str
-) -> str:
+def move_to_unclassified(file_id: str, classification_result, reason: str) -> str:
     """
     Move a document to the unclassified folder when it cannot be properly archived.
     Also creates a text file with the classification results.
 
     Args:
         file_id: The ID of the file to move
-        file_name: The name of the file
         classification_result: The classification result object
         reason: The reason why the document is being moved to unclassified
 
@@ -396,10 +393,11 @@ def move_to_unclassified(
         A confirmation message
     """
 
-    print(f"\n{RED}Moving [{file_name}] to unclassified folder:\n{reason}{RESET}")
-
-    # Move the file
+    # Get file info
     file = DRIVE_SERVICE.files().get(fileId=file_id, fields="id, name, parents").execute()
+    file_name = file.get("name")
+
+    print(f"\n{RED}Moving [{file_name}] to unclassified folder:\n{reason}{RESET}")
     parents = file.get("parents")
     previous_parents = ",".join(parents)
 
@@ -435,15 +433,12 @@ def move_to_unclassified(
     return f"Moved to unclassified folder: {reason}"
 
 
-def move_to_folder(
-    file_id: str, file_name: str, path: str, new_name: str | None = None
-) -> str:
+def move_to_folder(file_id: str, path: str, new_name: str | None = None) -> str:
     """
     Move a document to a specific folder path (relative to ARCHIVE_ROOT_FOLDER_ID for year-based organization).
 
     Args:
         file_id: The ID of the file to move
-        file_name: The name of the file
         path: The folder path relative to archive root (e.g., "2024/2024-01/Impostos")
         new_name: Optional new name for the file (should include .pdf extension)
 
@@ -478,16 +473,13 @@ def move_to_folder(
     return f"Document moved to {path} as {final_name}"
 
 
-def copy_to_folder(
-    file_id: str, file_name: str, path: str, new_name: str | None = None
-) -> str:
+def copy_to_folder(file_id: str, path: str, new_name: str | None = None) -> str:
     """
     Copy a document to a specific folder path (relative to ARCHIVE_ROOT_FOLDER_ID for year-based organization).
     The original file remains in its current location.
 
     Args:
         file_id: The ID of the file to copy
-        file_name: The name of the file
         path: The folder path relative to archive root (e.g., "2024/2024-01/Frete")
         new_name: Optional new name for the copied file (should include .pdf extension)
 
@@ -516,15 +508,12 @@ def copy_to_folder(
     return f"Document copied to {path} as {final_name} (copy ID: {copied_file.get('id')})"
 
 
-def move_to_left_behind(
-    file_id: str, file_name: str, path: str, new_name: str | None = None
-) -> str:
+def move_to_left_behind(file_id: str, path: str, new_name: str | None = None) -> str:
     """
     Move a document to the left behind folder organized by year/month for documents that need additional review or processing.
 
     Args:
         file_id: The ID of the file to move
-        file_name: The name of the file
         path: The folder path relative to LEFT_BEHIND_FOLDER_ID (e.g., "2024/2024-01")
         new_name: Optional new name for the file (should include .pdf extension)
 
@@ -677,16 +666,13 @@ def archive_with_ai(file_id: str, file_name: str, classification_result) -> None
 
     # Handle error cases upfront
     if classification_result is None:
-        move_to_unclassified(
-            file_id, file_name, classification_result, "Failed to classify document"
-        )
+        move_to_unclassified(file_id, classification_result, "Failed to classify document")
         return
 
     # Check if classification returned an error
     if hasattr(classification_result, "erro"):
         move_to_unclassified(
             file_id,
-            file_name,
             classification_result,
             f"Classification error: {classification_result.erro}",
         )
@@ -727,7 +713,6 @@ Based on the archiving rules in your system prompt, determine the appropriate ar
             print(f"{YELLOW}No actions returned from AI, moving to unclassified{RESET}")
             move_to_unclassified(
                 file_id,
-                file_name,
                 classification_result,
                 "AI returned no archiving actions",
             )
@@ -740,15 +725,14 @@ Based on the archiving rules in your system prompt, determine the appropriate ar
             print(f"\n{CYAN}Executing: {action.action} - {action.explanation}{RESET}")
 
             if action.action == "move_to_folder":
-                move_to_folder(file_id, file_name, action.path, action.new_name)
+                move_to_folder(file_id, action.path, action.new_name)
             elif action.action == "copy_to_folder":
-                copy_to_folder(file_id, file_name, action.path, action.new_name)
+                copy_to_folder(file_id, action.path, action.new_name)
             elif action.action == "move_to_left_behind":
-                move_to_left_behind(file_id, file_name, action.path, action.new_name)
+                move_to_left_behind(file_id, action.path, action.new_name)
             elif action.action == "move_to_unclassified":
                 move_to_unclassified(
                     file_id,
-                    file_name,
                     classification_result,
                     action.reason or "Unclassified by AI",
                 )
@@ -758,9 +742,7 @@ Based on the archiving rules in your system prompt, determine the appropriate ar
         traceback.print_exc()
         # On AI error, move to unclassified
         try:
-            move_to_unclassified(
-                file_id, file_name, classification_result, f"AI error: {str(e)}"
-            )
+            move_to_unclassified(file_id, classification_result, f"AI error: {str(e)}")
         except Exception as e2:
             print(f"{RED}Failed to move to unclassified: {e2}{RESET}")
 
