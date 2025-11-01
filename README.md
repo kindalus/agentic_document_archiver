@@ -15,7 +15,7 @@ Google Drive Document Archive Manager with Google AI - An intelligent system for
 
 ### Prerequisites
 
-- Python 3.9 or higher
+- Python 3.12 or higher
 - [uv](https://github.com/astral-sh/uv) package manager
 
 ### Install uv (if not already installed)
