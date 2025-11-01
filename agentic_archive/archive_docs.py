@@ -1,20 +1,24 @@
 """
-Google Drive Document Archive Manager with Pydantic AI
+Google Drive Document Archive Manager with Google AI
 
-This script manages documents in Google Drive by using an AI agent to classify them
+This script manages documents in Google Drive by using Google's Gemini AI to classify them
 and organize them into appropriate folder structures based on their metadata.
 """
 
 import os
 import traceback
+import json
 from dataclasses import dataclass
 from io import BytesIO
+from typing import Optional, Literal
+from pydantic import BaseModel
 from agentic_document_classifier import classify_document
+from google import genai
+from google.genai import types
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
-from pydantic_ai import Agent, RunContext
 
 
 # =============================================================================
@@ -23,7 +27,7 @@ from pydantic_ai import Agent, RunContext
 SERVICE_ACCOUNT_KEY_PATH = os.environ.get("SERVICE_ACCOUNT_KEY_PATH")
 ROOT_FOLDER_ID = os.environ.get("ROOT_FOLDER_ID")
 IMPERSONATED_EMAIL = os.environ.get("IMPERSONATED_EMAIL")
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
 COMPANY_FISCAL_ID = os.environ.get("COMPANY_FISCAL_ID")
 COMPANY_NAME = os.environ.get("COMPANY_NAME")
 
@@ -31,7 +35,7 @@ COMPANY_NAME = os.environ.get("COMPANY_NAME")
 required_env_vars = {
     "COMPANY_FISCAL_ID": COMPANY_FISCAL_ID,
     "COMPANY_NAME": COMPANY_NAME,
-    "GOOGLE_API_KEY": GOOGLE_API_KEY,
+    "GEMINI_API_KEY": GEMINI_API_KEY,
     "IMPERSONATED_EMAIL": IMPERSONATED_EMAIL,
     "ROOT_FOLDER_ID": ROOT_FOLDER_ID,
     "SERVICE_ACCOUNT_KEY_PATH": SERVICE_ACCOUNT_KEY_PATH,
@@ -68,13 +72,37 @@ CYAN = "\033[36m"
 
 
 # =============================================================================
+# Pydantic Models for Structured Output
+# =============================================================================
+
+
+class ArchiveAction(BaseModel):
+    """Structured output for archiving decisions"""
+
+    action: Literal[
+        "move_to_folder", "copy_to_folder", "move_to_left_behind", "move_to_unclassified"
+    ]
+    path: Optional[str] = None
+    new_name: Optional[str] = None
+    reason: Optional[str] = None
+    explanation: str
+
+
+class ArchiveDecision(BaseModel):
+    """Container for multiple archive actions"""
+
+    actions: list[ArchiveAction]
+    summary: str
+
+
+# =============================================================================
 # Dependencies Data Class
 # =============================================================================
 
 
 @dataclass
-class ArchiveDependencies:
-    """Dependencies injected into agent tools."""
+class ArchiveContext:
+    """Context for archiving operations."""
 
     service: any  # Google Drive service
     file_id: str
@@ -95,13 +123,11 @@ def create_drive_service():
     Returns:
         The authenticated Google Drive API service object
     """
-
     creds = Credentials.from_service_account_file(
         SERVICE_ACCOUNT_KEY_PATH, scopes=DRIVE_API_SCOPES
     )
     delegated_creds = creds.with_subject(IMPERSONATED_EMAIL)
     return build("drive", "v3", credentials=delegated_creds)
-    # return build("drive", "v3", credentials=creds)
 
 
 def download_file(
@@ -144,7 +170,7 @@ def find_pdf_documents(service, parent_folder_id: str) -> tuple[list[str], list[
         parent_folder_id: The ID of the folder to search in
 
     Returns:
-        A list of file IDs for PDF documents found in the folder
+        A tuple of (file_ids, file_names) for PDF documents found in the folder
     """
     try:
         files = []
@@ -174,12 +200,10 @@ def find_pdf_documents(service, parent_folder_id: str) -> tuple[list[str], list[
 
     except HttpError as error:
         print(f"{RED}An error occurred: {error}{RESET}")
-        return []
+        return [], []
 
 
-def create_or_get_folder(
-    service, folder_name: str, parent_id: str | None = None
-) -> str:
+def create_or_get_folder(service, folder_name: str, parent_id: str | None = None) -> str:
     """
     Creates a folder if it doesn't exist or retrieves its ID if it already exists.
 
@@ -309,9 +333,7 @@ def format_classification_to_text(classification_result) -> str:
     if hasattr(classification_result, "data_emissao"):
         lines.append(f"Data Emissao: {classification_result.data_emissao}")
     if hasattr(classification_result, "localizacao_ficheiro"):
-        lines.append(
-            f"Localizacao Ficheiro: {classification_result.localizacao_ficheiro}"
-        )
+        lines.append(f"Localizacao Ficheiro: {classification_result.localizacao_ficheiro}")
     if hasattr(classification_result, "notas_triagem"):
         lines.append(f"Notas Triagem: {classification_result.notas_triagem}")
 
@@ -365,128 +387,32 @@ def upload_text_file_to_drive(
         BytesIO(content.encode("utf-8")), mimetype="text/plain", resumable=True
     )
 
-    file = (
-        service.files()
-        .create(body=file_metadata, media_body=media, fields="id")
-        .execute()
-    )
+    file = service.files().create(body=file_metadata, media_body=media, fields="id").execute()
 
     return file.get("id")
 
 
 # =============================================================================
-# Pydantic AI Agent Definition
+# Archive Action Functions
 # =============================================================================
 
-# Create the agent using Google's Gemini model
-archive_agent = Agent(
-    "gemini-2.5-flash",
-    deps_type=ArchiveDependencies,
-    retries=2,
-)
 
-
-@archive_agent.system_prompt
-def archive_system_prompt() -> str:
-    """System prompt that defines the agent's role and decision-making rules."""
-    return f"""You are a document archiving specialist for a multi-company organization.
-
-Your task is to analyze classified documents and decide how to archive them based on the following rules:
-
-**OUR COMPANY IDENTIFIERS**:
-- Company Fiscal ID (NIF): {COMPANY_FISCAL_ID}
-- Company Name: {COMPANY_NAME}
-
-**DOCUMENT GROUPS AND ARCHIVING RULES**:
-
-1. **DOCUMENTOS_COMERCIAIS (Commercial Documents)**:
-   - If document type is FACTURA_PRO_FORMA: move_to_unclassified
-   - Check if nif_emitente == {COMPANY_FISCAL_ID}: We are the vendor
-     - RECIBO: Archive to: {{year}}/{{year-month}}/[Facturas - Recibos - Clientes]
-     - Other types:  Archive to: {{year}}/{{year-month}}/[Facturas - Clientes]
-     - Filename: {{date}} - {{document_type}} {{document_number}}.pdf
-   - Check if nif_cliente == {COMPANY_FISCAL_ID}: We are the client
-     - RECIBOS: Archive to: {{year}}/{{year-month}}/Recibos - Fornecedores]
-     - Other types: Archive to: {{year}}/{{year-month}}/[Facturas - Fornecedores]
-     - Filename: {{date}} - {{vendor_name}} - {{document_type}} {{document_number}}.pdf
-   - If neither matches: move_to_unclassified
-
-2. **DOCUMENTOS_ADUANEIROS (Customs Documents)**:
-   - NOTA_LIQUIDACAO:
-     - copy_to_folder to {{year}}/{{year-month}}/Impostos
-       - Copy filename: {{date}} - {{document_type}} {{document_number}}.pdf
-     - move_to_left_behind
-       - Left behind filename: {{date}} - {{document_type}} {{document_number}}.pdf
-   - RECIBO:
-     - copy_to_folder to {{year}}/{{year-month}}/Impostos - Liquidacoes
-       - Copy filename: {{date}} - {{document_type}} {{document_number}}.pdf
-     - move_to_left_behind
-       - Left behind filename: {{date}} - {{document_type}} {{document_number}}.pdf
-   - Other types: move_to_left_behind
-     - Filename: {{date}} - {{document_type}} {{document_number}}.pdf
-
-3. **DOCUMENTOS_FISCAIS (Tax Documents)**:
-   - Check if nif_contribuinte == {COMPANY_FISCAL_ID} or nome_contribuinte matches "{COMPANY_NAME}"
-   - If yes:
-     - Archive to: {{year}}/{{year-month}}/Impostos
-     - Filename: {{date}} - {{document_type}} {{document_number}}.pdf
-   - Otherwise: move_to_unclassified
-
-4. **DOCUMENTOS_BANCARIOS (Banking Documents)**:
-   - Archive to: {{year}}/{{year-month}}/Bancos
-   - Filename: {{date}} - {{document_type}} {{document_number}}.pdf
-
-5. **DOCUMENTOS_FRETE (Freight Documents)**:
-   - Filename: {{date}} - {{document_type}} {{document_number}}.pdf
-   - Then move_to_left_behind (do not use move_to_unclassified)
-
-6. **DOCUMENTOS_RH (Human Resources Documents)**:
-   - FOLHA_REMUNERACAO:
-     - Filename: Salarios {{mes_referencia}}.pdf
-     - Archive to: {{year}}/{{year-month}}/Salarios
-   - Other types: move_to_left_behind
-     - Filename: {{date}} - {{document_type}} {{document_number}}.pdf
-
-7. **OUTROS_DOCUMENTOS (Other Documents)**:
-   - Always: move_to_unclassified
-
-**DECISION PROCESS**:
-1. Analyze the classification result including document group and metadata
-2. Compare document identifiers (NIF, company names) against our company identifiers
-3. Determine which archiving rule applies based on document type and company match
-4. Decide on appropriate filenames based on the document type and metadata
-5. Call the appropriate tool(s) to archive the document
-6. Provide a brief explanation of your decision
-
-**IMPORTANT**:
-- Use copy_to_folder when document needs to be in multiple locations
-- Use move_to_folder for standard archiving
-- Use move_to_unclassified when document cannot be classified or doesn't match our company
-- You decide the final filename - make it descriptive and follow the patterns shown in the rules
-- Handle special characters in filenames appropriately for filesystem compatibility
-- Always compare NIFs and company names against our company identifiers to ensure documents belong to us
-- In Angola company names often have the company activity scope and legal status, for example: Zafir - Tecnologia, Lda
-  - When it is present in company's name, just remove it. example: Ubiquus - Representacoes, Lda ==> Ubiquus
-"""
-
-
-@archive_agent.tool
-def move_to_unclassified(ctx: RunContext[ArchiveDependencies], reason: str) -> str:
+def move_to_unclassified(ctx: ArchiveContext, reason: str) -> str:
     """
     Move a document to the unclassified folder when it cannot be properly archived.
     Also creates a text file with the classification results.
 
     Args:
-        ctx: The run context with dependencies
+        ctx: The archive context
         reason: The reason why the document is being moved to unclassified
 
     Returns:
         A confirmation message
     """
-    service = ctx.deps.service
-    file_id = ctx.deps.file_id
-    file_name = ctx.deps.file_name
-    classification_result = ctx.deps.classification_result
+    service = ctx.service
+    file_id = ctx.file_id
+    file_name = ctx.file_name
+    classification_result = ctx.classification_result
 
     print(f"\n{RED}Moving [{file_name}] to unclassified folder:\n{reason}{RESET}")
 
@@ -527,24 +453,21 @@ def move_to_unclassified(ctx: RunContext[ArchiveDependencies], reason: str) -> s
     return f"Moved to unclassified folder: {reason}"
 
 
-@archive_agent.tool
-def move_to_folder(
-    ctx: RunContext[ArchiveDependencies], path: str, new_name: str | None = None
-) -> str:
+def move_to_folder(ctx: ArchiveContext, path: str, new_name: str | None = None) -> str:
     """
     Move a document to a specific folder path (relative to ARCHIVE_ROOT_FOLDER_ID for year-based organization).
 
     Args:
-        ctx: The run context with dependencies
+        ctx: The archive context
         path: The folder path relative to archive root (e.g., "2024/2024-01/Impostos")
         new_name: Optional new name for the file (should include .pdf extension)
 
     Returns:
         A confirmation message
     """
-    service = ctx.deps.service
-    file_id = ctx.deps.file_id
-    file_name = ctx.deps.file_name
+    service = ctx.service
+    file_id = ctx.file_id
+    file_name = ctx.file_name
 
     print(f"\n{GREEN}Moving to: {path}/{new_name if new_name else ''}{RESET}")
 
@@ -573,25 +496,22 @@ def move_to_folder(
     return f"Document moved to {path} as {final_name}"
 
 
-@archive_agent.tool
-def copy_to_folder(
-    ctx: RunContext[ArchiveDependencies], path: str, new_name: str | None = None
-) -> str:
+def copy_to_folder(ctx: ArchiveContext, path: str, new_name: str | None = None) -> str:
     """
     Copy a document to a specific folder path (relative to ARCHIVE_ROOT_FOLDER_ID for year-based organization).
     The original file remains in its current location.
 
     Args:
-        ctx: The run context with dependencies
+        ctx: The archive context
         path: The folder path relative to archive root (e.g., "2024/2024-01/Frete")
         new_name: Optional new name for the copied file (should include .pdf extension)
 
     Returns:
         A confirmation message
     """
-    service = ctx.deps.service
-    file_id = ctx.deps.file_id
-    file_name = ctx.deps.file_name
+    service = ctx.service
+    file_id = ctx.file_id
+    file_name = ctx.file_name
 
     print(f"\n{GREEN}Copying to: {path}/{new_name if new_name else ''}{RESET}")
 
@@ -611,29 +531,24 @@ def copy_to_folder(
     )
 
     print(f"{GREEN}File {file_id} copied to {path} as {final_name}{RESET}")
-    return (
-        f"Document copied to {path} as {final_name} (copy ID: {copied_file.get('id')})"
-    )
+    return f"Document copied to {path} as {final_name} (copy ID: {copied_file.get('id')})"
 
 
-@archive_agent.tool
-def move_to_left_behind(
-    ctx: RunContext[ArchiveDependencies], path: str, new_name: str | None = None
-) -> str:
+def move_to_left_behind(ctx: ArchiveContext, path: str, new_name: str | None = None) -> str:
     """
     Move a document to the left behind folder organized by year/month for documents that need additional review or processing.
 
     Args:
-        ctx: The run context with dependencies
+        ctx: The archive context
         path: The folder path relative to LEFT_BEHIND_FOLDER_ID (e.g., "2024/2024-01")
         new_name: Optional new name for the file (should include .pdf extension)
 
     Returns:
         A confirmation message
     """
-    service = ctx.deps.service
-    file_id = ctx.deps.file_id
-    file_name = ctx.deps.file_name
+    service = ctx.service
+    file_id = ctx.file_id
+    file_name = ctx.file_name
 
     print(
         f"\n{CYAN}Moving to left behind folder: {path}/{new_name if new_name else ''}{RESET}"
@@ -664,13 +579,221 @@ def move_to_left_behind(
 
 
 # =============================================================================
+# Google AI Archive Agent
+# =============================================================================
+
+
+def get_archive_system_prompt() -> str:
+    """System prompt that defines the agent's role and decision-making rules."""
+    return f"""You are a document archiving specialist for a multi-company organization.
+
+Your task is to analyze classified documents and decide how to archive them based on the following rules.
+
+**OUR COMPANY IDENTIFIERS**:
+- Company Fiscal ID (NIF): {COMPANY_FISCAL_ID}
+- Company Name: {COMPANY_NAME}
+
+**DOCUMENT GROUPS AND ARCHIVING RULES**:
+
+1. **DOCUMENTOS_COMERCIAIS (Commercial Documents)**:
+   - If document type is FACTURA_PRO_FORMA: move_to_unclassified
+   - Check if nif_emitente == {COMPANY_FISCAL_ID}: We are the vendor
+     - RECIBO: Archive to: {{{{year}}}}/{{{{year-month}}}}/[Facturas - Recibos - Clientes]
+     - Other types:  Archive to: {{{{year}}}}/{{{{year-month}}}}/[Facturas - Clientes]
+     - Filename: {{{{date}}}} - {{{{document_type}}}} {{{{document_number}}}}.pdf
+   - Check if nif_cliente == {COMPANY_FISCAL_ID}: We are the client
+     - RECIBOS: Archive to: {{{{year}}}}/{{{{year-month}}}}/Recibos - Fornecedores]
+     - Other types: Archive to: {{{{year}}}}/{{{{year-month}}}}/[Facturas - Fornecedores]
+     - Filename: {{{{date}}}} - {{{{vendor_name}}}} - {{{{document_type}}}} {{{{document_number}}}}.pdf
+   - If neither matches: move_to_unclassified
+
+2. **DOCUMENTOS_ADUANEIROS (Customs Documents)**:
+   - NOTA_LIQUIDACAO:
+     - copy_to_folder to {{{{year}}}}/{{{{year-month}}}}/Impostos
+       - Copy filename: {{{{date}}}} - {{{{document_type}}}} {{{{document_number}}}}.pdf
+     - move_to_left_behind
+       - Left behind filename: {{{{date}}}} - {{{{document_type}}}} {{{{document_number}}}}.pdf
+   - RECIBO:
+     - copy_to_folder to {{{{year}}}}/{{{{year-month}}}}/Impostos - Liquidacoes
+       - Copy filename: {{{{date}}}} - {{{{document_type}}}} {{{{document_number}}}}.pdf
+     - move_to_left_behind
+       - Left behind filename: {{{{date}}}} - {{{{document_type}}}} {{{{document_number}}}}.pdf
+   - Other types: move_to_left_behind
+     - Filename: {{{{date}}}} - {{{{document_type}}}} {{{{document_number}}}}.pdf
+
+3. **DOCUMENTOS_FISCAIS (Tax Documents)**:
+   - Check if nif_contribuinte == {COMPANY_FISCAL_ID} or nome_contribuinte matches "{COMPANY_NAME}"
+   - If yes:
+     - Archive to: {{{{year}}}}/{{{{year-month}}}}/Impostos
+     - Filename: {{{{date}}}} - {{{{document_type}}}} {{{{document_number}}}}.pdf
+   - Otherwise: move_to_unclassified
+
+4. **DOCUMENTOS_BANCARIOS (Banking Documents)**:
+   - Archive to: {{{{year}}}}/{{{{year-month}}}}/Bancos
+   - Filename: {{{{date}}}} - {{{{document_type}}}} {{{{document_number}}}}.pdf
+
+5. **DOCUMENTOS_FRETE (Freight Documents)**:
+   - Filename: {{{{date}}}} - {{{{document_type}}}} {{{{document_number}}}}.pdf
+   - Then move_to_left_behind (do not use move_to_unclassified)
+
+6. **DOCUMENTOS_RH (Human Resources Documents)**:
+   - FOLHA_REMUNERACAO:
+     - Filename: Salarios {{{{mes_referencia}}}}.pdf
+     - Archive to: {{{{year}}}}/{{{{year-month}}}}/Salarios
+   - Other types: move_to_left_behind
+     - Filename: {{{{date}}}} - {{{{document_type}}}} {{{{document_number}}}}.pdf
+
+7. **OUTROS_DOCUMENTOS (Other Documents)**:
+   - Always: move_to_unclassified
+
+**DECISION PROCESS**:
+1. Analyze the classification result including document group and metadata
+2. Compare document identifiers (NIF, company names) against our company identifiers
+3. Determine which archiving rule applies based on document type and company match
+4. Decide on appropriate filenames based on the document type and metadata
+5. Return a structured list of actions to execute
+6. Provide a brief explanation of your decision
+
+**IMPORTANT**:
+- Use copy_to_folder when document needs to be in multiple locations (returns multiple actions)
+- Use move_to_folder for standard archiving
+- Use move_to_unclassified when document cannot be classified or doesn't match our company
+- You decide the final filename - make it descriptive and follow the patterns shown in the rules
+- Handle special characters in filenames appropriately for filesystem compatibility
+- Always compare NIFs and company names against our company identifiers to ensure documents belong to us
+- In Angola company names often have the company activity scope and legal status, for example: Zafir - Tecnologia, Lda
+  - When it is present in company's name, just remove it. example: Ubiquus - Representacoes, Lda ==> Ubiquus
+
+**OUTPUT FORMAT**:
+Return a JSON object with the following structure:
+{{
+  "actions": [
+    {{
+      "action": "move_to_folder" | "copy_to_folder" | "move_to_left_behind" | "move_to_unclassified",
+      "path": "path/to/folder" (required for move_to_folder, copy_to_folder, move_to_left_behind),
+      "new_name": "filename.pdf" (optional),
+      "reason": "reason text" (required for move_to_unclassified),
+      "explanation": "brief explanation of this action"
+    }}
+  ],
+  "summary": "overall summary of the archiving decision"
+}}
+"""
+
+
+def archive_with_ai(ctx: ArchiveContext, classification_result) -> None:
+    """
+    Uses Google AI to make archiving decisions and execute them.
+
+    Args:
+        ctx: The archive context
+        classification_result: The classification result from classify_document
+    """
+    # Initialize Google AI client
+    client = genai.Client(api_key=GEMINI_API_KEY)
+
+    # Handle error cases upfront
+    if classification_result is None:
+        move_to_unclassified(ctx, "Failed to classify document")
+        return
+
+    # Check if classification returned an error
+    if hasattr(classification_result, "erro"):
+        move_to_unclassified(ctx, f"Classification error: {classification_result.erro}")
+        return
+
+    # Create a detailed prompt for the AI
+    prompt = f"""Analyze and archive this document:
+
+**Classification Result**:
+- Document Group: {classification_result.grupo_documento}
+- Document Type: {getattr(classification_result, "tipo_documento", "N/A")}
+- Issue Date: {getattr(classification_result, "data_emissao", "N/A")}
+- Document Number: {getattr(classification_result, "numero_documento", "N/A")}
+
+**Metadata**:
+{format_metadata(classification_result)}
+
+Based on the archiving rules in your system prompt, determine the appropriate archiving action(s) and provide them in the required JSON format.
+"""
+
+    try:
+        # Call Google AI with structured output
+        response = client.models.generate_content(
+            model="gemini-2.0-flash-exp",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=get_archive_system_prompt(),
+                response_mime_type="application/json",
+                response_schema=ArchiveDecision,
+                temperature=0.1,
+            ),
+        )
+
+        # Parse the structured response
+        decision = response.parsed
+
+        if not decision or not decision.actions:
+            print(f"{YELLOW}No actions returned from AI, moving to unclassified{RESET}")
+            move_to_unclassified(ctx, "AI returned no archiving actions")
+            return
+
+        print(f"\n{CYAN}AI Decision Summary: {decision.summary}{RESET}")
+
+        # Execute each action
+        for action in decision.actions:
+            print(f"\n{CYAN}Executing: {action.action} - {action.explanation}{RESET}")
+
+            if action.action == "move_to_folder":
+                move_to_folder(ctx, action.path, action.new_name)
+            elif action.action == "copy_to_folder":
+                copy_to_folder(ctx, action.path, action.new_name)
+            elif action.action == "move_to_left_behind":
+                move_to_left_behind(ctx, action.path, action.new_name)
+            elif action.action == "move_to_unclassified":
+                move_to_unclassified(ctx, action.reason or "Unclassified by AI")
+
+    except Exception as e:
+        print(f"{RED}AI error when trying to archive document: {e}{RESET}")
+        traceback.print_exc()
+        # On AI error, move to unclassified
+        try:
+            move_to_unclassified(ctx, f"AI error: {str(e)}")
+        except Exception as e2:
+            print(f"{RED}Failed to move to unclassified: {e2}{RESET}")
+
+
+def format_metadata(classification_result) -> str:
+    """Format metadata for display in the AI prompt."""
+    if not hasattr(classification_result, "metadados_documento"):
+        return "No metadata available"
+
+    metadata = classification_result.metadados_documento
+    lines = []
+
+    # Common fields
+    if hasattr(metadata, "nif_emitente"):
+        lines.append(f"- Issuer Tax ID: {metadata.nif_emitente}")
+    if hasattr(metadata, "nome_emitente"):
+        lines.append(f"- Issuer Name: {metadata.nome_emitente}")
+    if hasattr(metadata, "nif_cliente"):
+        lines.append(f"- Client Tax ID: {metadata.nif_cliente}")
+    if hasattr(metadata, "nome_cliente"):
+        lines.append(f"- Client Name: {metadata.nome_cliente}")
+    if hasattr(metadata, "nif_contribuinte"):
+        lines.append(f"- Taxpayer ID: {metadata.nif_contribuinte}")
+    if hasattr(metadata, "nome_contribuinte"):
+        lines.append(f"- Taxpayer Name: {metadata.nome_contribuinte}")
+
+    return "\n".join(lines) if lines else "No metadata available"
+
+
+# =============================================================================
 # Main Execution
 # =============================================================================
 
 
-def process_document(
-    service, file_id: str, file_name: str, destination_folder: str = "/tmp"
-):
+def process_document(service, file_id: str, file_name: str, destination_folder: str = "/tmp"):
     """
     Processes a document by downloading and classifying it.
 
@@ -711,111 +834,6 @@ def process_document(
         return None
 
 
-def archive_with_agent(
-    service, file_id: str, file_name: str, classification_result, file_path: str
-):
-    """
-    Uses the Pydantic AI agent to make archiving decisions.
-
-    Args:
-        service: The Google Drive service
-        file_id: The file ID
-        classification_result: The classification result from classify_document
-        file_path: The path to the downloaded file
-    """
-    # Prepare dependencies for the agent
-    deps = ArchiveDependencies(
-        service=service,
-        file_id=file_id,
-        file_name=file_name,
-        file_path=file_path,
-        classification_result=classification_result,
-    )
-
-    # Handle error cases upfront - use the agent tool
-    if classification_result is None:
-        # Call the agent tool directly through a minimal agent run
-        try:
-            result = archive_agent.run_sync(
-                "The document failed to classify. Move it to unclassified with reason: 'Failed to classify document'",
-                deps=deps,
-            )
-            print(f"{RED}\nAgent decision: {result.output}{RESET}")
-        except Exception as e:
-            print(f"{RED}Agent error (classification result is None): {e}{RESET}")
-            traceback.print_exc()
-
-        return
-
-    # Check if classification returned an error by looking for 'erro' attribute
-    if hasattr(classification_result, "erro"):
-        try:
-            result = archive_agent.run_sync(
-                f"The document classification returned an error. Move it to unclassified with reason: 'Classification error: {classification_result.erro}'",
-                deps=deps,
-            )
-            print(f"{RED}\nAgent decision: {result.output}{RESET}")
-        except Exception as e:
-            print(f"{RED}Agent error (classification result has error): {e}{RESET}")
-            traceback.print_exc()
-        return
-
-    # Create a detailed prompt for the agent
-    prompt = f"""Analyze and archive this document:
-
-**Classification Result**:
-- Document Group: {classification_result.grupo_documento}
-- Document Type: {getattr(classification_result, "tipo_documento", "N/A")}
-- Issue Date: {getattr(classification_result, "data_emissao", "N/A")}
-- Document Number: {getattr(classification_result, "numero_documento", "N/A")}
-
-**Metadata**:
-{format_metadata(classification_result)}
-
-Based on the archiving rules in your system prompt, determine the appropriate archiving action(s) and execute them.
-"""
-
-    # Run the agent
-    try:
-        archive_agent.run_sync(prompt, deps=deps)
-    except Exception as e:
-        print(f"{RED}Agent error when trying to archive document: {e}{RESET}")
-        traceback.print_exc()
-        # On agent error, try to move to unclassified using the tool
-        try:
-            result = archive_agent.run_sync(
-                f"There was an agent error. Move the document to unclassified with reason: 'Agent error: {str(e)}'",
-                deps=deps,
-            )
-        except Exception as e2:
-            print(f"{RED}Failed to move to unclassified: {e2}{RESET}")
-
-
-def format_metadata(classification_result) -> str:
-    """Format metadata for display in the agent prompt."""
-    if not hasattr(classification_result, "metadados_documento"):
-        return "No metadata available"
-
-    metadata = classification_result.metadados_documento
-    lines = []
-
-    # Common fields
-    if hasattr(metadata, "nif_emitente"):
-        lines.append(f"- Issuer Tax ID: {metadata.nif_emitente}")
-    if hasattr(metadata, "nome_emitente"):
-        lines.append(f"- Issuer Name: {metadata.nome_emitente}")
-    if hasattr(metadata, "nif_cliente"):
-        lines.append(f"- Client Tax ID: {metadata.nif_cliente}")
-    if hasattr(metadata, "nome_cliente"):
-        lines.append(f"- Client Name: {metadata.nome_cliente}")
-    if hasattr(metadata, "nif_contribuinte"):
-        lines.append(f"- Taxpayer ID: {metadata.nif_contribuinte}")
-    if hasattr(metadata, "nome_contribuinte"):
-        lines.append(f"- Taxpayer Name: {metadata.nome_contribuinte}")
-
-    return "\n".join(lines) if lines else "No metadata available"
-
-
 def main():
     """
     Main function that executes the document classification and archiving workflow.
@@ -839,7 +857,7 @@ def main():
     print(f"\n{CYAN}Folder structure initialized{RESET}")
 
     # Scan for PDF documents
-    file_ids, file_names = find_pdf_documents(service, DROP_FOLDER_ID)  # pyright: ignore[reportArgumentType]
+    file_ids, file_names = find_pdf_documents(service, DROP_FOLDER_ID)
     print(f"{GREEN}Found {len(file_ids)} PDF documents in the drop folder.{RESET}")
 
     # Process each document
@@ -860,11 +878,16 @@ def main():
         print(f"Tipo:\t{getattr(classification_result, 'tipo_documento', 'N/A')}")
         print(f"Notas:\t{getattr(classification_result, 'notas_triagem', 'N/A')}\n")
 
-        # Archive using AI agent
+        # Archive using Google AI
         file_path = f"/tmp/{file_name}"
-        archive_with_agent(
-            service, file_id, file_name, classification_result, file_path
+        ctx = ArchiveContext(
+            service=service,
+            file_id=file_id,
+            file_name=file_name,
+            file_path=file_path,
+            classification_result=classification_result,
         )
+        archive_with_ai(ctx, classification_result)
 
 
 if __name__ == "__main__":

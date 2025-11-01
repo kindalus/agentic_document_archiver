@@ -1,14 +1,14 @@
 [project]
 name = "agentic-archive"
-version = "0.1.0"
-description = "Google Drive Document Archive Manager with Pydantic AI"
+version = "0.2.0"
+description = "Google Drive Document Archive Manager with Google AI"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [
     { name = "Zafir", email = "info@zafir.co.ao" }
 ]
-keywords = ["google-drive", "document-management", "ai", "archiving", "pydantic-ai"]
+keywords = ["google-drive", "document-management", "ai", "archiving", "google-ai", "gemini"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -22,11 +22,11 @@ classifiers = [
 
 dependencies = [
     "agentic-document-classifier @ git+https://github.com/kindalus/agentic_document_classifier.git",
+    "google-genai>=1.0.0",
     "google-auth>=2.0.0",
     "google-auth-oauthlib>=1.0.0",
     "google-auth-httplib2>=0.2.0",
     "google-api-python-client>=2.0.0",
-    "pydantic-ai>=0.0.1",
     "pydantic>=2.0.0",
 ]
 

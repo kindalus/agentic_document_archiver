@@ -1,14 +1,15 @@
 # Agentic Archive
 
-Google Drive Document Archive Manager with Pydantic AI - An intelligent system for automatically classifying and organizing documents in Google Drive using AI-powered decision making.
+Google Drive Document Archive Manager with Google AI - An intelligent system for automatically classifying and organizing documents in Google Drive using Google's Gemini AI.
 
 ## Features
 
-- **AI-Powered Classification**: Uses Pydantic AI with Google's Gemini model to intelligently classify and route documents
+- **AI-Powered Classification**: Uses Google's Gemini AI with structured output for intelligent document classification and routing
 - **Google Drive Integration**: Seamlessly works with Google Drive API for document management
 - **Flexible Organization**: Automatically organizes documents into year/month-based folder structures
-- **Smart Decision Making**: AI agent makes contextual decisions based on document metadata
+- **Smart Decision Making**: Gemini AI makes contextual decisions based on document metadata with structured JSON responses
 - **Multiple Document Types**: Supports commercial, customs, tax, banking, freight, and HR documents
+- **Reliable & Modern**: Uses the official Google AI Python SDK (`google-genai`) for stable API integration
 
 ## Installation
 
@@ -71,7 +72,11 @@ uv pip install agentic-archive
 cp .env.example .env
 ```
 
-2. **Edit `.env` with your configuration:**
+2. **Get your Google AI API Key:**
+
+Visit [Google AI Studio](https://aistudio.google.com/apikey) to get your free Gemini API key.
+
+3. **Edit `.env` with your configuration:**
 
 ```bash
 # Google Drive Configuration
@@ -79,23 +84,24 @@ SERVICE_ACCOUNT_KEY_PATH=/path/to/your/service-account-key.json
 ROOT_FOLDER_ID=your_root_folder_id_here
 IMPERSONATED_EMAIL=user@example.com
 
-# Google API Configuration
-GOOGLE_API_KEY=your_google_api_key_here
+# Google AI Configuration
+GEMINI_API_KEY=your_gemini_api_key_here
 
 # Company Information
 COMPANY_FISCAL_ID=your_company_nif_here
 COMPANY_NAME=Your Company Name
 ```
 
-3. **Load environment variables:**
+4. **Load environment variables:**
 
 ```bash
 # Option 1: Use a tool like direnv
-# Option 2: Source manually
-source .env
+# Option 2: Source manually (in bash/zsh)
+export $(cat .env | xargs)
 
-# Option 3: Export each variable
+# Option 3: Export each variable individually
 export SERVICE_ACCOUNT_KEY_PATH=/path/to/key.json
+export GEMINI_API_KEY=your_api_key
 # ... etc
 ```
 
@@ -132,14 +138,14 @@ uv run python -m agentic_archive.archive_docs
 #### Option 4: Using the package programmatically
 
 ```python
-from agentic_archive import create_drive_service, main
+from agentic_archive import create_drive_service, archive_with_ai, main
 
 # Use the main function
 main()
 
-# Or use individual functions
+# Or use individual functions for custom workflows
 service = create_drive_service()
-# ... your custom logic
+# ... your custom logic with archive_with_ai
 ```
 
 ### Development Workflow with uv
@@ -207,10 +213,11 @@ agentic_document_archiver/
    - Extracts metadata (dates, company info, document types)
 
 3. **AI-Powered Archiving**:
-   - AI agent analyzes classification results
+   - Google's Gemini AI analyzes classification results using structured output
    - Makes decisions based on document type and metadata
+   - Returns JSON-formatted archiving actions
    - Automatically files documents in appropriate folders
-   - Creates descriptive filenames
+   - Creates descriptive filenames following defined patterns
 
 4. **Document Types Supported**:
    - Commercial documents (invoices, receipts)
@@ -222,21 +229,23 @@ agentic_document_archiver/
 
 ## Environment Variables
 
-| Variable                   | Description                                  | Required |
-| -------------------------- | -------------------------------------------- | -------- |
-| `SERVICE_ACCOUNT_KEY_PATH` | Path to Google service account JSON key      | Yes      |
-| `ROOT_FOLDER_ID`           | Google Drive root folder ID for organization | Yes      |
-| `IMPERSONATED_EMAIL`       | Email for domain-wide delegation             | Yes      |
-| `GOOGLE_API_KEY`           | Google API key for Gemini AI                 | Yes      |
-| `COMPANY_FISCAL_ID`        | Your company's tax ID (NIF)                  | Yes      |
-| `COMPANY_NAME`             | Your company name                            | Yes      |
+| Variable                   | Description                                                                             | Required |
+| -------------------------- | --------------------------------------------------------------------------------------- | -------- |
+| `SERVICE_ACCOUNT_KEY_PATH` | Path to Google service account JSON key                                                 | Yes      |
+| `ROOT_FOLDER_ID`           | Google Drive root folder ID for organization                                            | Yes      |
+| `IMPERSONATED_EMAIL`       | Email for domain-wide delegation                                                        | Yes      |
+| `GEMINI_API_KEY`           | Google AI API key for Gemini (get from [AI Studio](https://aistudio.google.com/apikey)) | Yes      |
+| `GOOGLE_API_KEY`           | Alternative to GEMINI_API_KEY (legacy support)                                          | No       |
+| `COMPANY_FISCAL_ID`        | Your company's tax ID (NIF)                                                             | Yes      |
+| `COMPANY_NAME`             | Your company name                                                                       | Yes      |
 
 ## Dependencies
 
+- `google-genai` - Official Google AI Python SDK for Gemini
 - `google-auth` - Google authentication
 - `google-api-python-client` - Google Drive API client
-- `pydantic-ai` - AI agent framework
-- `pydantic` - Data validation
+- `pydantic` - Data validation and structured output schemas
+- `agentic-document-classifier` - Document classification agent
 
 ## License
 
