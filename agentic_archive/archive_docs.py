@@ -8,8 +8,7 @@ and organize them into appropriate folder structures based on their metadata.
 import os
 import traceback
 from io import BytesIO
-from typing import Optional, Literal
-from pydantic import BaseModel
+
 from agentic_document_classifier import classify_document
 from google import genai
 from google.genai import types
@@ -17,7 +16,6 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
-
 
 # =============================================================================
 # Configuration from Environment Variables
@@ -52,6 +50,10 @@ UNCLASSIFIED_FOLDER_ID = None
 LEFT_BEHIND_FOLDER_ID = None
 ARCHIVE_ROOT_FOLDER_ID = None
 
+# Context for current document being processed (used by AI tools)
+_CURRENT_FILE_ID = None
+_CURRENT_CLASSIFICATION_RESULT = None
+
 # =============================================================================
 # Constants
 # =============================================================================
@@ -68,30 +70,6 @@ RED = "\033[31m"
 GREEN = "\033[32m"
 YELLOW = "\033[33m"
 CYAN = "\033[36m"
-
-
-# =============================================================================
-# Pydantic Models for Structured Output
-# =============================================================================
-
-
-class ArchiveAction(BaseModel):
-    """Structured output for archiving decisions"""
-
-    action: Literal[
-        "move_to_folder", "copy_to_folder", "move_to_left_behind", "move_to_unclassified"
-    ]
-    path: Optional[str] = None
-    new_name: Optional[str] = None
-    reason: Optional[str] = None
-    explanation: str
-
-
-class ArchiveDecision(BaseModel):
-    """Container for multiple archive actions"""
-
-    actions: list[ArchiveAction]
-    summary: str
 
 
 # =============================================================================
@@ -303,7 +281,7 @@ def format_classification_to_text(classification_result) -> str:
 
     # Check for error
     if hasattr(classification_result, "erro"):
-        lines.append(f"Status: ERROR")
+        lines.append("Status: ERROR")
         lines.append(f"Error: {classification_result.erro}")
         return "\n".join(lines)
 
@@ -375,18 +353,20 @@ def upload_text_file_to_drive(
 
 
 # =============================================================================
-# Archive Action Functions
+# Archive Action Functions (Internal)
 # =============================================================================
 
 
-def move_to_unclassified(file_id: str, classification_result, reason: str) -> str:
+def _move_to_unclassified_internal(
+    file_id: str, classification_result_text: str, reason: str
+) -> str:
     """
     Move a document to the unclassified folder when it cannot be properly archived.
     Also creates a text file with the classification results.
 
     Args:
         file_id: The ID of the file to move
-        classification_result: The classification result object
+        classification_result: The classification result string
         reason: The reason why the document is being moved to unclassified
 
     Returns:
@@ -416,8 +396,9 @@ def move_to_unclassified(file_id: str, classification_result, reason: str) -> st
         results_file_name = f"{base_name}_results.txt"
 
         # Format classification results
-        results_content = format_classification_to_text(classification_result)
-        results_content += f"\n\nReason for unclassified: {reason}\n"
+        results_content = (
+            classification_result_text + f"\n\nReason for unclassified: {reason}\n"
+        )
 
         # Upload the text file to the same folder
         upload_text_file_to_drive(
@@ -550,6 +531,78 @@ def move_to_left_behind(file_id: str, path: str, new_name: str | None = None) ->
 
 
 # =============================================================================
+# AI-Callable Tool Functions (for automatic function calling)
+# =============================================================================
+
+
+def archive_move_to_folder(path: str, new_name: str = None) -> str:
+    """Move the current document to a specific folder path for archiving.
+
+    Use this for standard document archiving based on year/month structure.
+    The path should be relative to the archive root folder.
+
+    Args:
+        path: Folder path relative to archive root, e.g. "2024/2024-01/Impostos"
+        new_name: Optional new filename with .pdf extension, e.g. "2024-01-15 - FACTURA 123.pdf"
+
+    Returns:
+        Confirmation message
+    """
+    return move_to_folder(_CURRENT_FILE_ID, path, new_name)
+
+
+def archive_copy_to_folder(path: str, new_name: str = None) -> str:
+    """Copy the current document to a specific folder path.
+
+    Use this when the document needs to be in multiple locations.
+    The original file remains in its current location.
+
+    Args:
+        path: Folder path relative to archive root, e.g. "2024/2024-01/Frete"
+        new_name: Optional new filename with .pdf extension
+
+    Returns:
+        Confirmation message
+    """
+    return copy_to_folder(_CURRENT_FILE_ID, path, new_name)
+
+
+def archive_move_to_left_behind(path: str, new_name: str = None) -> str:
+    """Move the current document to the left behind folder for manual review.
+
+    Use this for documents that need additional review or processing.
+    The document will be organized by year/month in the Irrelevantes folder.
+
+    Args:
+        path: Folder path relative to left behind folder, e.g. "2024/2024-01"
+        new_name: Optional new filename with .pdf extension
+
+    Returns:
+        Confirmation message
+    """
+    return move_to_left_behind(_CURRENT_FILE_ID, path, new_name)
+
+
+def archive_move_to_unclassified(reason: str) -> str:
+    """Move the current document to the unclassified folder.
+
+    Use this when:
+    - Document does not belong to our company
+    - Document type is not supported
+    - Missing required metadata for proper archiving
+    - Classification was uncertain or ambiguous
+
+    Args:
+        reason: Clear explanation of why the document cannot be archived properly
+
+    Returns:
+        Confirmation message
+    """
+    classification_text = format_classification_to_text(_CURRENT_CLASSIFICATION_RESULT)
+    return _move_to_unclassified_internal(_CURRENT_FILE_ID, classification_text, reason)
+
+
+# =============================================================================
 # Google AI Archive Agent
 # =============================================================================
 
@@ -622,33 +675,24 @@ Your task is to analyze classified documents and decide how to archive them base
 2. Compare document identifiers (NIF, company names) against our company identifiers
 3. Determine which archiving rule applies based on document type and company match
 4. Decide on appropriate filenames based on the document type and metadata
-5. Return a structured list of actions to execute
-6. Provide a brief explanation of your decision
+5. Call the appropriate archiving tool function(s) to execute the actions
 
 **IMPORTANT**:
-- Use copy_to_folder when document needs to be in multiple locations (returns multiple actions)
-- Use move_to_folder for standard archiving
-- Use move_to_unclassified when document cannot be classified or doesn't match our company
+- Use archive_copy_to_folder when document needs to be in multiple locations (call it first, then call another function)
+- Use archive_move_to_folder for standard archiving
+- Use archive_move_to_unclassified when document cannot be classified or doesn't match our company
+- Use archive_move_to_left_behind for documents needing manual review
 - You decide the final filename - make it descriptive and follow the patterns shown in the rules
 - Handle special characters in filenames appropriately for filesystem compatibility
 - Always compare NIFs and company names against our company identifiers to ensure documents belong to us
 - In Angola company names often have the company activity scope and legal status, for example: Zafir - Tecnologia, Lda
   - When it is present in company's name, just remove it. example: Ubiquus - Representacoes, Lda ==> Ubiquus
 
-**OUTPUT FORMAT**:
-Return a JSON object with the following structure:
-{{
-  "actions": [
-    {{
-      "action": "move_to_folder" | "copy_to_folder" | "move_to_left_behind" | "move_to_unclassified",
-      "path": "path/to/folder" (required for move_to_folder, copy_to_folder, move_to_left_behind),
-      "new_name": "filename.pdf" (optional),
-      "reason": "reason text" (required for move_to_unclassified),
-      "explanation": "brief explanation of this action"
-    }}
-  ],
-  "summary": "overall summary of the archiving decision"
-}}
+**AVAILABLE TOOLS**:
+- archive_move_to_folder(path, new_name): Move document to archive folder
+- archive_copy_to_folder(path, new_name): Copy document to archive folder (original stays)
+- archive_move_to_left_behind(path, new_name): Move to left behind folder for review
+- archive_move_to_unclassified(reason): Move to unclassified folder with reason
 """
 
 
@@ -661,25 +705,35 @@ def archive_with_ai(file_id: str, file_name: str, classification_result) -> None
         file_name: The name of the file
         classification_result: The classification result from classify_document
     """
+    global _CURRENT_FILE_ID, _CURRENT_CLASSIFICATION_RESULT
+
+    # Set context for AI tools
+    _CURRENT_FILE_ID = file_id
+    _CURRENT_CLASSIFICATION_RESULT = classification_result
+
     # Initialize Google AI client
     client = genai.Client(api_key=GEMINI_API_KEY)
 
     # Handle error cases upfront
     if classification_result is None:
-        move_to_unclassified(file_id, classification_result, "Failed to classify document")
+        _move_to_unclassified_internal(
+            file_id,
+            format_classification_to_text(classification_result),
+            "Failed to classify document",
+        )
         return
 
     # Check if classification returned an error
     if hasattr(classification_result, "erro"):
-        move_to_unclassified(
+        _move_to_unclassified_internal(
             file_id,
-            classification_result,
+            format_classification_to_text(classification_result),
             f"Classification error: {classification_result.erro}",
         )
         return
 
     # Create a detailed prompt for the AI
-    prompt = f"""Analyze and archive this document:
+    prompt = f"""Analyze and archive this document using the available tools:
 
 **Classification Result**:
 - Document Group: {classification_result.grupo_documento}
@@ -690,61 +744,48 @@ def archive_with_ai(file_id: str, file_name: str, classification_result) -> None
 **Metadata**:
 {format_metadata(classification_result)}
 
-Based on the archiving rules in your system prompt, determine the appropriate archiving action(s) and provide them in the required JSON format.
+Based on the archiving rules in your system prompt, call the appropriate archiving tool function(s) to process this document.
+You may need to call multiple functions (e.g., copy_to_folder then move_to_left_behind).
 """
 
     try:
-        # Call Google AI with structured output
+        # Call Google AI with automatic function calling
         response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=prompt,
             config=types.GenerateContentConfig(
                 system_instruction=get_archive_system_prompt(),
-                response_mime_type="application/json",
-                response_schema=ArchiveDecision,
+                tools=[
+                    archive_move_to_folder,
+                    archive_copy_to_folder,
+                    archive_move_to_left_behind,
+                    archive_move_to_unclassified,
+                ],
                 temperature=0.1,
             ),
         )
 
-        # Parse the structured response
-        decision = response.parsed
-
-        if not decision or not decision.actions:
-            print(f"{YELLOW}No actions returned from AI, moving to unclassified{RESET}")
-            move_to_unclassified(
-                file_id,
-                classification_result,
-                "AI returned no archiving actions",
-            )
-            return
-
-        print(f"\n{CYAN}AI Decision Summary: {decision.summary}{RESET}")
-
-        # Execute each action
-        for action in decision.actions:
-            print(f"\n{CYAN}Executing: {action.action} - {action.explanation}{RESET}")
-
-            if action.action == "move_to_folder":
-                move_to_folder(file_id, action.path, action.new_name)
-            elif action.action == "copy_to_folder":
-                copy_to_folder(file_id, action.path, action.new_name)
-            elif action.action == "move_to_left_behind":
-                move_to_left_behind(file_id, action.path, action.new_name)
-            elif action.action == "move_to_unclassified":
-                move_to_unclassified(
-                    file_id,
-                    classification_result,
-                    action.reason or "Unclassified by AI",
-                )
+        # The SDK automatically executes the function calls
+        print(f"\n{CYAN}AI archiving completed{RESET}")
+        if response.text:
+            print(f"{CYAN}Summary: {response.text}{RESET}")
 
     except Exception as e:
         print(f"{RED}AI error when trying to archive document: {e}{RESET}")
         traceback.print_exc()
         # On AI error, move to unclassified
         try:
-            move_to_unclassified(file_id, classification_result, f"AI error: {str(e)}")
+            _move_to_unclassified_internal(
+                file_id,
+                format_classification_to_text(classification_result),
+                f"AI error: {str(e)}",
+            )
         except Exception as e2:
             print(f"{RED}Failed to move to unclassified: {e2}{RESET}")
+    finally:
+        # Clear context
+        _CURRENT_FILE_ID = None
+        _CURRENT_CLASSIFICATION_RESULT = None
 
 
 def format_metadata(classification_result) -> str:
