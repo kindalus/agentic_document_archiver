@@ -45,7 +45,8 @@ if missing_vars:
         f"Missing required environment variables: {', '.join(missing_vars)}"
     )
 
-# Global variables for folder IDs (initialized at runtime)
+# Global variables (initialized at runtime)
+DRIVE_SERVICE = None
 DROP_FOLDER_ID = None
 UNCLASSIFIED_FOLDER_ID = None
 LEFT_BEHIND_FOLDER_ID = None
@@ -380,14 +381,13 @@ def upload_text_file_to_drive(
 
 
 def move_to_unclassified(
-    service, file_id: str, file_name: str, classification_result, reason: str
+    file_id: str, file_name: str, classification_result, reason: str
 ) -> str:
     """
     Move a document to the unclassified folder when it cannot be properly archived.
     Also creates a text file with the classification results.
 
     Args:
-        service: The authenticated Google Drive API service object
         file_id: The ID of the file to move
         file_name: The name of the file
         classification_result: The classification result object
@@ -400,11 +400,11 @@ def move_to_unclassified(
     print(f"\n{RED}Moving [{file_name}] to unclassified folder:\n{reason}{RESET}")
 
     # Move the file
-    file = service.files().get(fileId=file_id, fields="id, name, parents").execute()
+    file = DRIVE_SERVICE.files().get(fileId=file_id, fields="id, name, parents").execute()
     parents = file.get("parents")
     previous_parents = ",".join(parents)
 
-    service.files().update(
+    DRIVE_SERVICE.files().update(
         fileId=file_id,
         body={"name": file.get("name")},
         addParents=UNCLASSIFIED_FOLDER_ID,
@@ -424,7 +424,7 @@ def move_to_unclassified(
 
         # Upload the text file to the same folder
         upload_text_file_to_drive(
-            service, results_content, results_file_name, UNCLASSIFIED_FOLDER_ID
+            DRIVE_SERVICE, results_content, results_file_name, UNCLASSIFIED_FOLDER_ID
         )
 
         print(f"{RED}Classification results file created{RESET}")
@@ -437,13 +437,12 @@ def move_to_unclassified(
 
 
 def move_to_folder(
-    service, file_id: str, file_name: str, path: str, new_name: str | None = None
+    file_id: str, file_name: str, path: str, new_name: str | None = None
 ) -> str:
     """
     Move a document to a specific folder path (relative to ARCHIVE_ROOT_FOLDER_ID for year-based organization).
 
     Args:
-        service: The authenticated Google Drive API service object
         file_id: The ID of the file to move
         file_name: The name of the file
         path: The folder path relative to archive root (e.g., "2024/2024-01/Impostos")
@@ -457,17 +456,17 @@ def move_to_folder(
 
     # Parse the path and create folder structure under ARCHIVE_ROOT_FOLDER_ID (which is ROOT_FOLDER_ID)
     path_parts = path.split("/")
-    parent_folder_id = create_folder_path(service, path_parts, ARCHIVE_ROOT_FOLDER_ID)
+    parent_folder_id = create_folder_path(DRIVE_SERVICE, path_parts, ARCHIVE_ROOT_FOLDER_ID)
 
     # Get current file info
-    file = service.files().get(fileId=file_id, fields="name, parents").execute()
+    file = DRIVE_SERVICE.files().get(fileId=file_id, fields="name, parents").execute()
     previous_parents = ",".join(file.get("parents"))
 
     # Prepare the new name
     final_name = new_name if new_name else file.get("name")
 
     # Move the file
-    service.files().update(
+    DRIVE_SERVICE.files().update(
         fileId=file_id,
         body={"name": final_name},
         addParents=parent_folder_id,
@@ -481,14 +480,13 @@ def move_to_folder(
 
 
 def copy_to_folder(
-    service, file_id: str, file_name: str, path: str, new_name: str | None = None
+    file_id: str, file_name: str, path: str, new_name: str | None = None
 ) -> str:
     """
     Copy a document to a specific folder path (relative to ARCHIVE_ROOT_FOLDER_ID for year-based organization).
     The original file remains in its current location.
 
     Args:
-        service: The authenticated Google Drive API service object
         file_id: The ID of the file to copy
         file_name: The name of the file
         path: The folder path relative to archive root (e.g., "2024/2024-01/Frete")
@@ -502,15 +500,15 @@ def copy_to_folder(
 
     # Parse the path and create folder structure under ARCHIVE_ROOT_FOLDER_ID (which is ROOT_FOLDER_ID)
     path_parts = path.split("/")
-    parent_folder_id = create_folder_path(service, path_parts, ARCHIVE_ROOT_FOLDER_ID)
+    parent_folder_id = create_folder_path(DRIVE_SERVICE, path_parts, ARCHIVE_ROOT_FOLDER_ID)
 
     # Get current file info
-    file = service.files().get(fileId=file_id, fields="name").execute()
+    file = DRIVE_SERVICE.files().get(fileId=file_id, fields="name").execute()
     final_name = new_name if new_name else file.get("name")
 
     # Copy the file
     copied_file = (
-        service.files()
+        DRIVE_SERVICE.files()
         .copy(fileId=file_id, body={"name": final_name, "parents": [parent_folder_id]})
         .execute()
     )
@@ -520,13 +518,12 @@ def copy_to_folder(
 
 
 def move_to_left_behind(
-    service, file_id: str, file_name: str, path: str, new_name: str | None = None
+    file_id: str, file_name: str, path: str, new_name: str | None = None
 ) -> str:
     """
     Move a document to the left behind folder organized by year/month for documents that need additional review or processing.
 
     Args:
-        service: The authenticated Google Drive API service object
         file_id: The ID of the file to move
         file_name: The name of the file
         path: The folder path relative to LEFT_BEHIND_FOLDER_ID (e.g., "2024/2024-01")
@@ -542,17 +539,17 @@ def move_to_left_behind(
 
     # Parse the path and create folder structure under LEFT_BEHIND_FOLDER_ID
     path_parts = path.split("/")
-    parent_folder_id = create_folder_path(service, path_parts, LEFT_BEHIND_FOLDER_ID)
+    parent_folder_id = create_folder_path(DRIVE_SERVICE, path_parts, LEFT_BEHIND_FOLDER_ID)
 
     # Get current file info
-    file = service.files().get(fileId=file_id, fields="name, parents").execute()
+    file = DRIVE_SERVICE.files().get(fileId=file_id, fields="name, parents").execute()
     previous_parents = ",".join(file.get("parents"))
 
     # Prepare the new name
     final_name = new_name if new_name else file.get("name")
 
     # Move to left behind folder
-    service.files().update(
+    DRIVE_SERVICE.files().update(
         fileId=file_id,
         body={"name": final_name},
         addParents=parent_folder_id,
@@ -667,12 +664,11 @@ Return a JSON object with the following structure:
 """
 
 
-def archive_with_ai(service, file_id: str, file_name: str, classification_result) -> None:
+def archive_with_ai(file_id: str, file_name: str, classification_result) -> None:
     """
     Uses Google AI to make archiving decisions and execute them.
 
     Args:
-        service: The authenticated Google Drive API service object
         file_id: The ID of the file to archive
         file_name: The name of the file
         classification_result: The classification result from classify_document
@@ -683,14 +679,13 @@ def archive_with_ai(service, file_id: str, file_name: str, classification_result
     # Handle error cases upfront
     if classification_result is None:
         move_to_unclassified(
-            service, file_id, file_name, classification_result, "Failed to classify document"
+            file_id, file_name, classification_result, "Failed to classify document"
         )
         return
 
     # Check if classification returned an error
     if hasattr(classification_result, "erro"):
         move_to_unclassified(
-            service,
             file_id,
             file_name,
             classification_result,
@@ -732,7 +727,6 @@ Based on the archiving rules in your system prompt, determine the appropriate ar
         if not decision or not decision.actions:
             print(f"{YELLOW}No actions returned from AI, moving to unclassified{RESET}")
             move_to_unclassified(
-                service,
                 file_id,
                 file_name,
                 classification_result,
@@ -747,14 +741,13 @@ Based on the archiving rules in your system prompt, determine the appropriate ar
             print(f"\n{CYAN}Executing: {action.action} - {action.explanation}{RESET}")
 
             if action.action == "move_to_folder":
-                move_to_folder(service, file_id, file_name, action.path, action.new_name)
+                move_to_folder(file_id, file_name, action.path, action.new_name)
             elif action.action == "copy_to_folder":
-                copy_to_folder(service, file_id, file_name, action.path, action.new_name)
+                copy_to_folder(file_id, file_name, action.path, action.new_name)
             elif action.action == "move_to_left_behind":
-                move_to_left_behind(service, file_id, file_name, action.path, action.new_name)
+                move_to_left_behind(file_id, file_name, action.path, action.new_name)
             elif action.action == "move_to_unclassified":
                 move_to_unclassified(
-                    service,
                     file_id,
                     file_name,
                     classification_result,
@@ -767,7 +760,7 @@ Based on the archiving rules in your system prompt, determine the appropriate ar
         # On AI error, move to unclassified
         try:
             move_to_unclassified(
-                service, file_id, file_name, classification_result, f"AI error: {str(e)}"
+                file_id, file_name, classification_result, f"AI error: {str(e)}"
             )
         except Exception as e2:
             print(f"{RED}Failed to move to unclassified: {e2}{RESET}")
@@ -849,16 +842,17 @@ def main():
     Main function that executes the document classification and archiving workflow.
     """
     global \
+        DRIVE_SERVICE, \
         DROP_FOLDER_ID, \
         UNCLASSIFIED_FOLDER_ID, \
         LEFT_BEHIND_FOLDER_ID, \
         ARCHIVE_ROOT_FOLDER_ID
 
     # Create the Drive service
-    service = create_drive_service()
+    DRIVE_SERVICE = create_drive_service()
 
     # Initialize folder structure
-    folder_ids = initialize_folder_structure(service)
+    folder_ids = initialize_folder_structure(DRIVE_SERVICE)
     DROP_FOLDER_ID = folder_ids["drop"]
     UNCLASSIFIED_FOLDER_ID = folder_ids["unclassified"]
     LEFT_BEHIND_FOLDER_ID = folder_ids["left_behind"]
@@ -867,7 +861,7 @@ def main():
     print(f"\n{CYAN}Folder structure initialized{RESET}")
 
     # Scan for PDF documents
-    file_ids, file_names = find_pdf_documents(service, DROP_FOLDER_ID)
+    file_ids, file_names = find_pdf_documents(DRIVE_SERVICE, DROP_FOLDER_ID)
     print(f"{GREEN}Found {len(file_ids)} PDF documents in the drop folder.{RESET}")
 
     # Process each document
@@ -876,7 +870,7 @@ def main():
         print(f"{CYAN}{'=' * 95}{RESET}")
 
         # Download and classify
-        classification_result = process_document(service, file_id, file_name)
+        classification_result = process_document(DRIVE_SERVICE, file_id, file_name)
 
         if classification_result is None:
             print(f"{RED}Failed to classify document: {file_id}{RESET}")
@@ -889,7 +883,7 @@ def main():
         print(f"Notas:\t{getattr(classification_result, 'notas_triagem', 'N/A')}\n")
 
         # Archive using Google AI
-        archive_with_ai(service, file_id, file_name, classification_result)
+        archive_with_ai(file_id, file_name, classification_result)
 
 
 if __name__ == "__main__":
