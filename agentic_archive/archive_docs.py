@@ -114,13 +114,12 @@ def create_drive_service():
 
 
 def download_file(
-    service, file_id: str, file_name: str, destination_folder: str = "/tmp"
+    file_id: str, file_name: str, destination_folder: str = "/tmp"
 ) -> str | None:
     """
     Downloads a file from Google Drive by its ID.
 
     Args:
-        service: The authenticated Google Drive API service object
         file_id: The ID of the file to download
         file_name: The name of the file (used for saving)
         destination_folder: The folder to save the downloaded file
@@ -129,7 +128,7 @@ def download_file(
         The path to the downloaded file if successful, None otherwise
     """
     try:
-        request = service.files().get_media(fileId=file_id)
+        request = DRIVE_SERVICE.files().get_media(fileId=file_id)
         # Sanitize filename by replacing "/" with "_" to avoid invalid paths
         sanitized_file_name = file_name.replace("/", "_")
         file_path = f"{destination_folder}/{sanitized_file_name}"
@@ -796,12 +795,11 @@ def format_metadata(classification_result) -> str:
 # =============================================================================
 
 
-def process_document(service, file_id: str, file_name: str, destination_folder: str = "/tmp"):
+def process_document(file_id: str, file_name: str, destination_folder: str = "/tmp"):
     """
     Processes a document by downloading and classifying it.
 
     Args:
-        service: The authenticated Google Drive API service object
         file_id: The ID of the document to process
         file_name: The name of the file
         destination_folder: The folder to save downloaded files
@@ -811,7 +809,7 @@ def process_document(service, file_id: str, file_name: str, destination_folder: 
     """
     file_path = None
     try:
-        file_path = download_file(service, file_id, file_name, destination_folder)
+        file_path = download_file(file_id, file_name, destination_folder)
 
         if file_path:
             result = classify_document(file_path)
@@ -870,7 +868,7 @@ def main():
         print(f"{CYAN}{'=' * 95}{RESET}")
 
         # Download and classify
-        classification_result = process_document(DRIVE_SERVICE, file_id, file_name)
+        classification_result = process_document(file_id, file_name)
 
         if classification_result is None:
             print(f"{RED}Failed to classify document: {file_id}{RESET}")
