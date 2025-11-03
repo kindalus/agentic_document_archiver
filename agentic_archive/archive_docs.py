@@ -5,6 +5,7 @@ This script manages documents in Google Drive by using Google's Gemini AI to cla
 and organize them into appropriate folder structures based on their metadata.
 """
 
+import argparse
 import os
 import traceback
 from io import BytesIO
@@ -18,6 +19,11 @@ from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
 from agentic_archive.pretty_print import pretty_print
+
+# =============================================================================
+# Version
+# =============================================================================
+__version__ = "0.1.0"
 
 # =============================================================================
 # Configuration from Environment Variables
@@ -544,9 +550,11 @@ Your task is to analyze classified documents and decide how to archive them base
 - archive_move_to_left_behind(file_id, path, new_name): Move to left behind folder for review
 - archive_move_to_unclassified(file_id, reason): Move to unclassified folder with reason
 
+
 **IMPORTANT**: The file_id parameter will be provided in the user prompt. Use it when calling the tools.
 
 When moving files to uclassified folder, include the entire classification result in the reason explanation
+Format the classification result to a key-value format with a maximum of 100 chars per line, wrap lines if needed
 """
 
 
@@ -683,6 +691,18 @@ def main():
     """
     Main function that executes the document classification and archiving workflow.
     """
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(
+        description="Google Drive Document Archive Manager with Google AI",
+        prog="agentic-archive",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+    )
+    parser.parse_args()
+
     global \
         DRIVE_SERVICE, \
         DROP_FOLDER_ID, \
