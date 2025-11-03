@@ -50,9 +50,6 @@ UNCLASSIFIED_FOLDER_ID = None
 LEFT_BEHIND_FOLDER_ID = None
 ARCHIVE_ROOT_FOLDER_ID = None
 
-# Context for current document being processed (used by AI tools)
-_CURRENT_FILE_ID = None
-_CURRENT_CLASSIFICATION_RESULT = None
 
 # =============================================================================
 # Constants
@@ -535,55 +532,58 @@ def move_to_left_behind(file_id: str, path: str, new_name: str | None = None) ->
 # =============================================================================
 
 
-def archive_move_to_folder(path: str, new_name: str = None) -> str:
+def archive_move_to_folder(file_id: str, path: str, new_name: str = None) -> str:
     """Move the current document to a specific folder path for archiving.
 
     Use this for standard document archiving based on year/month structure.
     The path should be relative to the archive root folder.
 
     Args:
+        file_id: The Google Drive file ID of the document to move
         path: Folder path relative to archive root, e.g. "2024/2024-01/Impostos"
         new_name: Optional new filename with .pdf extension, e.g. "2024-01-15 - FACTURA 123.pdf"
 
     Returns:
         Confirmation message
     """
-    return move_to_folder(_CURRENT_FILE_ID, path, new_name)
+    return move_to_folder(file_id, path, new_name)
 
 
-def archive_copy_to_folder(path: str, new_name: str = None) -> str:
+def archive_copy_to_folder(file_id: str, path: str, new_name: str = None) -> str:
     """Copy the current document to a specific folder path.
 
     Use this when the document needs to be in multiple locations.
     The original file remains in its current location.
 
     Args:
+        file_id: The Google Drive file ID of the document to copy
         path: Folder path relative to archive root, e.g. "2024/2024-01/Frete"
         new_name: Optional new filename with .pdf extension
 
     Returns:
         Confirmation message
     """
-    return copy_to_folder(_CURRENT_FILE_ID, path, new_name)
+    return copy_to_folder(file_id, path, new_name)
 
 
-def archive_move_to_left_behind(path: str, new_name: str = None) -> str:
+def archive_move_to_left_behind(file_id: str, path: str, new_name: str = None) -> str:
     """Move the current document to the left behind folder for manual review.
 
     Use this for documents that need additional review or processing.
     The document will be organized by year/month in the Irrelevantes folder.
 
     Args:
+        file_id: The Google Drive file ID of the document to move
         path: Folder path relative to left behind folder, e.g. "2024/2024-01"
         new_name: Optional new filename with .pdf extension
 
     Returns:
         Confirmation message
     """
-    return move_to_left_behind(_CURRENT_FILE_ID, path, new_name)
+    return move_to_left_behind(file_id, path, new_name)
 
 
-def archive_move_to_unclassified(reason: str) -> str:
+def archive_move_to_unclassified(file_id: str, reason: str) -> str:
     """Move the current document to the unclassified folder.
 
     Use this when:
@@ -593,13 +593,15 @@ def archive_move_to_unclassified(reason: str) -> str:
     - Classification was uncertain or ambiguous
 
     Args:
+        file_id: The Google Drive file ID of the document to move
         reason: Clear explanation of why the document cannot be archived properly
 
     Returns:
         Confirmation message
     """
-    classification_text = format_classification_to_text(_CURRENT_CLASSIFICATION_RESULT)
-    return _move_to_unclassified_internal(_CURRENT_FILE_ID, classification_text, reason)
+    # Classification details are in the AI prompt context, create a note with the reason
+    classification_note = f"Document moved to unclassified by AI agent.\n\nReason: {reason}"
+    return _move_to_unclassified_internal(file_id, classification_note, reason)
 
 
 # =============================================================================
@@ -689,28 +691,23 @@ Your task is to analyze classified documents and decide how to archive them base
   - When it is present in company's name, just remove it. example: Ubiquus - Representacoes, Lda ==> Ubiquus
 
 **AVAILABLE TOOLS**:
-- archive_move_to_folder(path, new_name): Move document to archive folder
-- archive_copy_to_folder(path, new_name): Copy document to archive folder (original stays)
-- archive_move_to_left_behind(path, new_name): Move to left behind folder for review
-- archive_move_to_unclassified(reason): Move to unclassified folder with reason
+- archive_move_to_folder(file_id, path, new_name): Move document to archive folder
+- archive_copy_to_folder(file_id, path, new_name): Copy document to archive folder (original stays)
+- archive_move_to_left_behind(file_id, path, new_name): Move to left behind folder for review
+- archive_move_to_unclassified(file_id, reason): Move to unclassified folder with reason
+
+**IMPORTANT**: The file_id parameter will be provided in the user prompt. Use it when calling the tools.
 """
 
 
-def archive_with_ai(file_id: str, file_name: str, classification_result) -> None:
+def archive_with_ai(file_id: str, classification_result) -> None:
     """
     Uses Google AI to make archiving decisions and execute them.
 
     Args:
         file_id: The ID of the file to archive
-        file_name: The name of the file
         classification_result: The classification result from classify_document
     """
-    global _CURRENT_FILE_ID, _CURRENT_CLASSIFICATION_RESULT
-
-    # Set context for AI tools
-    _CURRENT_FILE_ID = file_id
-    _CURRENT_CLASSIFICATION_RESULT = classification_result
-
     # Initialize Google AI client
     client = genai.Client(api_key=GEMINI_API_KEY)
 
@@ -746,6 +743,12 @@ def archive_with_ai(file_id: str, file_name: str, classification_result) -> None
 
 Based on the archiving rules in your system prompt, call the appropriate archiving tool function(s) to process this document.
 You may need to call multiple functions (e.g., copy_to_folder then move_to_left_behind).
+
+**FILE IDENTIFIER**:
+The `file_id` to use with tools is `{file_id}`
+
+**COMPLETE DOCUMENT CLASSIFICATION RESULTS**:
+{classification_result.models_json_dumps(indent=4)}
 """
 
     try:
@@ -782,10 +785,6 @@ You may need to call multiple functions (e.g., copy_to_folder then move_to_left_
             )
         except Exception as e2:
             print(f"{RED}Failed to move to unclassified: {e2}{RESET}")
-    finally:
-        # Clear context
-        _CURRENT_FILE_ID = None
-        _CURRENT_CLASSIFICATION_RESULT = None
 
 
 def format_metadata(classification_result) -> str:
@@ -904,7 +903,7 @@ def main():
         print(f"Notas:\t{getattr(classification_result, 'notas_triagem', 'N/A')}\n")
 
         # Archive using Google AI
-        archive_with_ai(file_id, file_name, classification_result)
+        archive_with_ai(file_id, classification_result)
 
 
 if __name__ == "__main__":
