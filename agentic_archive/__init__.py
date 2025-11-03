@@ -12,7 +12,7 @@ from agentic_archive.archive_docs import (
     main,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 __all__ = [
     "create_drive_service",
     "process_document",
