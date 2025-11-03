@@ -242,10 +242,9 @@ agentic_document_archiver/
 ## Dependencies
 
 - `google-genai` - Official Google AI Python SDK for Gemini
-- `google-auth` - Google authentication
+- `google-auth` - Google authentication library
 - `google-api-python-client` - Google Drive API client
-- `pydantic` - Data validation and structured output schemas
-- `agentic-document-classifier` - Document classification agent
+- `agentic-document-classifier` - Document classification agent (includes Pydantic AI)
 
 ## License
 

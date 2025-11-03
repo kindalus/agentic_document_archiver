@@ -256,7 +256,7 @@ def initialize_folder_structure(service) -> dict[str, str]:
     }
 
 
-def format_classification_to_text(classification_result) -> str:
+def format_classification_to_text(classification_result: BaseModel) -> str:
     """
     Format classification result to a human-readable text format with key: value pairs.
 
