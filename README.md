@@ -30,7 +30,41 @@ powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 
 ### Install the Package
 
-#### Option 1: Install from source (for development)
+#### Option 1: Global Installation (Recommended for CLI usage)
+
+Install globally using `uv tool` to make the `agentic-archive` command available system-wide:
+
+```bash
+# Install globally from GitHub
+uv tool install git+https://github.com/kindalus/agentic_document_archiver.git
+
+# Or if published to PyPI (future)
+uv tool install agentic-archive
+
+# Verify installation
+agentic-archive --help
+```
+
+After global installation, the `agentic-archive` command will be available in your PATH.
+
+#### Option 2: Install in a Virtual Environment
+
+For development or isolated usage:
+
+```bash
+# Install directly from GitHub
+uv pip install git+https://github.com/kindalus/agentic_document_archiver.git
+
+# Or install from local directory
+uv pip install /path/to/agentic_document_archiver
+
+# Or if published to PyPI (future)
+uv pip install agentic-archive
+```
+
+#### Option 3: Development Installation
+
+For contributing or modifying the code:
 
 ```bash
 # Clone the repository
@@ -50,19 +84,6 @@ uv pip install -e ".[dev]"
 ```
 
 **Note**: The `agentic-document-classifier` dependency is automatically installed from GitHub (https://github.com/kindalus/agentic_document_classifier.git) as part of the installation process.
-
-#### Option 2: Install directly with uv
-
-```bash
-# Install from local directory
-uv pip install /path/to/agentic_document_archiver
-
-# Or install directly from GitHub
-uv pip install git+https://github.com/kindalus/agentic_document_archiver.git
-
-# Or if published to PyPI (future)
-uv pip install agentic-archive
-```
 
 ## Configuration
 
@@ -107,45 +128,70 @@ export GEMINI_API_KEY=your_api_key
 
 ## Usage
 
-### Running with uv
+The `agentic-archive` tool provides multiple ways to run depending on your installation method.
 
-Once installed, you can run the archive manager in several ways:
+### Running the CLI
 
-#### Option 1: Using the installed command
+#### If Installed Globally (uv tool install)
+
+Simply run the command from anywhere:
 
 ```bash
-# Make sure your virtual environment is activated
-source .venv/bin/activate
+agentic-archive
+```
+
+The command is available system-wide and will use environment variables from your current shell.
+
+#### If Installed in Virtual Environment
+
+Activate the virtual environment first, then run:
+
+```bash
+# Activate virtual environment
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 
 # Run the command
 agentic-archive
 ```
 
-#### Option 2: Using uv run (recommended)
+#### From Development Directory
+
+If you're in the project directory with an editable installation:
 
 ```bash
-# Run directly with uv (automatically handles dependencies)
+# Using uv run (automatically handles virtual environment)
 uv run agentic-archive
+
+# Or activate the venv and run directly
+source .venv/bin/activate
+agentic-archive
 ```
 
-#### Option 3: As a Python module
+#### As a Python Module
+
+Run as a module without installing:
 
 ```bash
-# Run as a module
+# From the project directory
 uv run python -m agentic_archive.archive_docs
+
+# Or with activated venv
+python -m agentic_archive.archive_docs
 ```
 
-#### Option 4: Using the package programmatically
+### Using Programmatically
+
+Import and use the package in your Python code:
 
 ```python
 from agentic_archive import create_drive_service, archive_with_ai, main
 
-# Use the main function
+# Use the main function to run the full workflow
 main()
 
 # Or use individual functions for custom workflows
 service = create_drive_service()
-# ... your custom logic with archive_with_ai
+# ... your custom logic
 ```
 
 ### Development Workflow with uv
