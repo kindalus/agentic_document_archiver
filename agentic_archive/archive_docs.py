@@ -17,6 +17,8 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
+from agentic_archive.pretty_print import pretty_print
+
 # =============================================================================
 # Configuration from Environment Variables
 # =============================================================================
@@ -252,76 +254,11 @@ def initialize_folder_structure(service) -> dict[str, str]:
         "drop": drop_folder_id,
         "unclassified": unclassified_folder_id,
         "left_behind": left_behind_folder_id,
-        "archive_root": ROOT_FOLDER_ID,
+        "archive_root": ROOT_FOLDER_ID,  # pyright: ignore[reportReturnType]
     }
 
 
-def format_classification_to_text(classification_result: BaseModel) -> str:
-    """
-    Format classification result to a human-readable text format with key: value pairs.
-
-    Args:
-        classification_result: The classification result object
-
-    Returns:
-        A formatted string with all classification data
-    """
-    lines = []
-    lines.append("=" * 80)
-    lines.append("CLASSIFICATION RESULTS")
-    lines.append("=" * 80)
-    lines.append("")
-
-    if classification_result is None:
-        lines.append("Status: CLASSIFICATION FAILED")
-        return "\n".join(lines)
-
-    # Check for error
-    if hasattr(classification_result, "erro"):
-        lines.append("Status: ERROR")
-        lines.append(f"Error: {classification_result.erro}")
-        return "\n".join(lines)
-
-    # Main classification fields
-    if hasattr(classification_result, "grupo_documento"):
-        lines.append(f"Grupo Documento: {classification_result.grupo_documento}")
-    if hasattr(classification_result, "tipo_documento"):
-        lines.append(f"Tipo Documento: {classification_result.tipo_documento}")
-    if hasattr(classification_result, "data_emissao"):
-        lines.append(f"Data Emissao: {classification_result.data_emissao}")
-    if hasattr(classification_result, "localizacao_ficheiro"):
-        lines.append(f"Localizacao Ficheiro: {classification_result.localizacao_ficheiro}")
-    if hasattr(classification_result, "notas_triagem"):
-        lines.append(f"Notas Triagem: {classification_result.notas_triagem}")
-
-    # Metadata section
-    if (
-        hasattr(classification_result, "metadados_documento")
-        and classification_result.metadados_documento
-    ):
-        lines.append("")
-        lines.append("-" * 90)
-        lines.append("METADATA")
-        lines.append("-" * 90)
-
-        metadata = classification_result.metadados_documento
-
-        # Iterate through all attributes of metadata
-        for attr in dir(metadata):
-            if not attr.startswith("_") and not callable(getattr(metadata, attr)):
-                value = getattr(metadata, attr, None)
-                if value is not None:
-                    lines.append(f"{attr}: {value}")
-
-    lines.append("")
-    lines.append("=" * 90)
-
-    return "\n".join(lines)
-
-
-def upload_text_file_to_drive(
-    service, content: str, file_name: str, parent_folder_id: str
-) -> str:
+def upload_text_file_to_drive(service, content: str, file_name: str, parent_folder_id: str):
     """
     Upload a text file to Google Drive.
 
@@ -340,13 +277,10 @@ def upload_text_file_to_drive(
         "mimeType": "text/plain",
     }
 
-    media = MediaIoBaseUpload(
-        BytesIO(content.encode("utf-8")), mimetype="text/plain", resumable=True
-    )
+    bytes_content = BytesIO(content.encode("utf-8"))
+    media = MediaIoBaseUpload(bytes_content, mimetype="text/plain", resumable=True)
 
-    file = service.files().create(body=file_metadata, media_body=media, fields="id").execute()
-
-    return file.get("id")
+    _ = service.files().create(body=file_metadata, media_body=media, fields="id").execute()
 
 
 # =============================================================================
@@ -354,9 +288,7 @@ def upload_text_file_to_drive(
 # =============================================================================
 
 
-def _move_to_unclassified_internal(
-    file_id: str, classification_result_text: str, reason: str
-) -> str:
+def _move_to_unclassified_internal(file_id: str, classification_result_text: str, reason: str):
     """
     Move a document to the unclassified folder when it cannot be properly archived.
     Also creates a text file with the classification results.
@@ -374,7 +306,6 @@ def _move_to_unclassified_internal(
     file = DRIVE_SERVICE.files().get(fileId=file_id, fields="id, name, parents").execute()
     file_name = file.get("name")
 
-    print(f"\n{RED}Moving [{file_name}] to unclassified folder:\n{reason}{RESET}")
     parents = file.get("parents")
     previous_parents = ",".join(parents)
 
@@ -402,13 +333,8 @@ def _move_to_unclassified_internal(
             DRIVE_SERVICE, results_content, results_file_name, UNCLASSIFIED_FOLDER_ID
         )
 
-        print(f"{RED}Classification results file created{RESET}")
     except Exception as e:
         print(f"{YELLOW}Warning: Could not create results file: {e}{RESET}")
-
-    print(f"{RED}Done...{RESET}")
-
-    return f"Moved to unclassified folder: {reason}"
 
 
 # =============================================================================
@@ -416,7 +342,7 @@ def _move_to_unclassified_internal(
 # =============================================================================
 
 
-def archive_move_to_folder(file_id: str, path: str, new_name: str = None) -> str:
+def archive_move_to_folder(file_id: str, path: str, new_name: str = None) -> None:
     """Move the current document to a specific folder path for archiving.
 
     Use this for standard document archiving based on year/month structure.
@@ -426,11 +352,7 @@ def archive_move_to_folder(file_id: str, path: str, new_name: str = None) -> str
         file_id: The Google Drive file ID of the document to move
         path: Folder path relative to archive root, e.g. "2024/2024-01/Impostos"
         new_name: Optional new filename with .pdf extension, e.g. "2024-01-15 - FACTURA 123.pdf"
-
-    Returns:
-        Confirmation message
     """
-    print(f"\n{GREEN}Moving to: {path}/{new_name if new_name else ''}{RESET}")
 
     # Parse the path and create folder structure under ARCHIVE_ROOT_FOLDER_ID
     path_parts = path.split("/")
@@ -452,12 +374,8 @@ def archive_move_to_folder(file_id: str, path: str, new_name: str = None) -> str
         fields="id, parents",
     ).execute()
 
-    print(f"{GREEN}Done...{RESET}")
 
-    return f"Document moved to {path} as {final_name}"
-
-
-def archive_copy_to_folder(file_id: str, path: str, new_name: str = None) -> str:
+def archive_copy_to_folder(file_id: str, path: str, new_name: str = None) -> None:
     """Copy the current document to a specific folder path.
 
     Use this when the document needs to be in multiple locations.
@@ -467,11 +385,7 @@ def archive_copy_to_folder(file_id: str, path: str, new_name: str = None) -> str
         file_id: The Google Drive file ID of the document to copy
         path: Folder path relative to archive root, e.g. "2024/2024-01/Frete"
         new_name: Optional new filename with .pdf extension
-
-    Returns:
-        Confirmation message
     """
-    print(f"\n{GREEN}Copying to: {path}/{new_name if new_name else ''}{RESET}")
 
     # Parse the path and create folder structure under ARCHIVE_ROOT_FOLDER_ID
     path_parts = path.split("/")
@@ -482,17 +396,12 @@ def archive_copy_to_folder(file_id: str, path: str, new_name: str = None) -> str
     final_name = new_name if new_name else file.get("name")
 
     # Copy the file
-    copied_file = (
-        DRIVE_SERVICE.files()
-        .copy(fileId=file_id, body={"name": final_name, "parents": [parent_folder_id]})
-        .execute()
-    )
-
-    print(f"{GREEN}File {file_id} copied to {path} as {final_name}{RESET}")
-    return f"Document copied to {path} as {final_name} (copy ID: {copied_file.get('id')})"
+    DRIVE_SERVICE.files().copy(
+        fileId=file_id, body={"name": final_name, "parents": [parent_folder_id]}
+    ).execute()
 
 
-def archive_move_to_left_behind(file_id: str, path: str, new_name: str = None) -> str:
+def archive_move_to_left_behind(file_id: str, path: str, new_name: str | None = None) -> None:
     """Move the current document to the left behind folder for manual review.
 
     Use this for documents that need additional review or processing.
@@ -502,13 +411,7 @@ def archive_move_to_left_behind(file_id: str, path: str, new_name: str = None) -
         file_id: The Google Drive file ID of the document to move
         path: Folder path relative to left behind folder, e.g. "2024/2024-01"
         new_name: Optional new filename with .pdf extension
-
-    Returns:
-        Confirmation message
     """
-    print(
-        f"\n{CYAN}Moving to left behind folder: {path}/{new_name if new_name else ''}{RESET}"
-    )
 
     # Parse the path and create folder structure under LEFT_BEHIND_FOLDER_ID
     path_parts = path.split("/")
@@ -530,11 +433,8 @@ def archive_move_to_left_behind(file_id: str, path: str, new_name: str = None) -
         fields="id, parents",
     ).execute()
 
-    print(f"{GREEN}Done...{RESET}")
-    return f"Document moved to left behind folder {path} as {final_name}"
 
-
-def archive_move_to_unclassified(file_id: str, reason: str) -> str:
+def archive_move_to_unclassified(file_id: str, reason: str) -> None:
     """Move the current document to the unclassified folder.
 
     Use this when:
@@ -545,14 +445,11 @@ def archive_move_to_unclassified(file_id: str, reason: str) -> str:
 
     Args:
         file_id: The Google Drive file ID of the document to move
-        reason: Clear explanation of why the document cannot be archived properly
-
-    Returns:
-        Confirmation message
+        reason: Clear explanation of why the document cannot be archived properly, include the entire classification
     """
     # Classification details are in the AI prompt context, create a note with the reason
     classification_note = f"Document moved to unclassified by AI agent.\n\nReason: {reason}"
-    return _move_to_unclassified_internal(file_id, classification_note, reason)
+    _move_to_unclassified_internal(file_id, classification_note, reason)
 
 
 # =============================================================================
@@ -648,6 +545,8 @@ Your task is to analyze classified documents and decide how to archive them base
 - archive_move_to_unclassified(file_id, reason): Move to unclassified folder with reason
 
 **IMPORTANT**: The file_id parameter will be provided in the user prompt. Use it when calling the tools.
+
+When moving files to uclassified folder, include the entire classification result in the reason explanation
 """
 
 
@@ -666,7 +565,7 @@ def archive_with_ai(file_id: str, classification_result) -> None:
     if classification_result is None:
         _move_to_unclassified_internal(
             file_id,
-            format_classification_to_text(classification_result),
+            pretty_print(classification_result),
             "Failed to classify document",
         )
         return
@@ -675,7 +574,7 @@ def archive_with_ai(file_id: str, classification_result) -> None:
     if hasattr(classification_result, "erro"):
         _move_to_unclassified_internal(
             file_id,
-            format_classification_to_text(classification_result),
+            pretty_print(classification_result),
             f"Classification error: {classification_result.erro}",
         )
         return
@@ -689,9 +588,6 @@ def archive_with_ai(file_id: str, classification_result) -> None:
 - Issue Date: {getattr(classification_result, "data_emissao", "N/A")}
 - Document Number: {getattr(classification_result, "numero_documento", "N/A")}
 
-**Metadata**:
-{format_metadata(classification_result)}
-
 Based on the archiving rules in your system prompt, call the appropriate archiving tool function(s) to process this document.
 You may need to call multiple functions (e.g., copy_to_folder then move_to_left_behind).
 
@@ -699,7 +595,7 @@ You may need to call multiple functions (e.g., copy_to_folder then move_to_left_
 The `file_id` to use with tools is `{file_id}`
 
 **COMPLETE DOCUMENT CLASSIFICATION RESULTS**:
-{classification_result.models_json_dumps(indent=4)}
+{classification_result.model_dump_json(indent=4)}
 """
 
     try:
@@ -715,14 +611,14 @@ The `file_id` to use with tools is `{file_id}`
                     archive_move_to_left_behind,
                     archive_move_to_unclassified,
                 ],
-                temperature=0.1,
+                temperature=0.2,
             ),
         )
 
         # The SDK automatically executes the function calls
-        print(f"\n{CYAN}AI archiving completed{RESET}")
+        print(f"\n{GREEN}AI archiving completed{RESET}")
         if response.text:
-            print(f"{CYAN}Summary: {response.text}{RESET}")
+            print(f"{GREEN}Summary: {response.text}{RESET}")
 
     except Exception as e:
         print(f"{RED}AI error when trying to archive document: {e}{RESET}")
@@ -731,36 +627,11 @@ The `file_id` to use with tools is `{file_id}`
         try:
             _move_to_unclassified_internal(
                 file_id,
-                format_classification_to_text(classification_result),
+                pretty_print(classification_result),
                 f"AI error: {str(e)}",
             )
         except Exception as e2:
             print(f"{RED}Failed to move to unclassified: {e2}{RESET}")
-
-
-def format_metadata(classification_result) -> str:
-    """Format metadata for display in the AI prompt."""
-    if not hasattr(classification_result, "metadados_documento"):
-        return "No metadata available"
-
-    metadata = classification_result.metadados_documento
-    lines = []
-
-    # Common fields
-    if hasattr(metadata, "nif_emitente"):
-        lines.append(f"- Issuer Tax ID: {metadata.nif_emitente}")
-    if hasattr(metadata, "nome_emitente"):
-        lines.append(f"- Issuer Name: {metadata.nome_emitente}")
-    if hasattr(metadata, "nif_cliente"):
-        lines.append(f"- Client Tax ID: {metadata.nif_cliente}")
-    if hasattr(metadata, "nome_cliente"):
-        lines.append(f"- Client Name: {metadata.nome_cliente}")
-    if hasattr(metadata, "nif_contribuinte"):
-        lines.append(f"- Taxpayer ID: {metadata.nif_contribuinte}")
-    if hasattr(metadata, "nome_contribuinte"):
-        lines.append(f"- Taxpayer Name: {metadata.nome_contribuinte}")
-
-    return "\n".join(lines) if lines else "No metadata available"
 
 
 # =============================================================================
@@ -836,7 +707,7 @@ def main():
     print(f"{GREEN}Found {len(file_ids)} PDF documents in the drop folder.{RESET}")
 
     # Process each document
-    for file_id, file_name in zip(file_ids, file_names):
+    for file_id, file_name in zip(file_ids, file_names, strict=False):
         print(f"\n{CYAN}Processing file: {file_name}{RESET}")
         print(f"{CYAN}{'=' * 95}{RESET}")
 
