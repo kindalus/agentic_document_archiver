@@ -411,22 +411,28 @@ def _move_to_unclassified_internal(
     return f"Moved to unclassified folder: {reason}"
 
 
-def move_to_folder(file_id: str, path: str, new_name: str | None = None) -> str:
-    """
-    Move a document to a specific folder path (relative to ARCHIVE_ROOT_FOLDER_ID for year-based organization).
+# =============================================================================
+# AI-Callable Tool Functions (for automatic function calling)
+# =============================================================================
+
+
+def archive_move_to_folder(file_id: str, path: str, new_name: str = None) -> str:
+    """Move the current document to a specific folder path for archiving.
+
+    Use this for standard document archiving based on year/month structure.
+    The path should be relative to the archive root folder.
 
     Args:
-        file_id: The ID of the file to move
-        path: The folder path relative to archive root (e.g., "2024/2024-01/Impostos")
-        new_name: Optional new name for the file (should include .pdf extension)
+        file_id: The Google Drive file ID of the document to move
+        path: Folder path relative to archive root, e.g. "2024/2024-01/Impostos"
+        new_name: Optional new filename with .pdf extension, e.g. "2024-01-15 - FACTURA 123.pdf"
 
     Returns:
-        A confirmation message
+        Confirmation message
     """
-
     print(f"\n{GREEN}Moving to: {path}/{new_name if new_name else ''}{RESET}")
 
-    # Parse the path and create folder structure under ARCHIVE_ROOT_FOLDER_ID (which is ROOT_FOLDER_ID)
+    # Parse the path and create folder structure under ARCHIVE_ROOT_FOLDER_ID
     path_parts = path.split("/")
     parent_folder_id = create_folder_path(DRIVE_SERVICE, path_parts, ARCHIVE_ROOT_FOLDER_ID)
 
@@ -451,23 +457,23 @@ def move_to_folder(file_id: str, path: str, new_name: str | None = None) -> str:
     return f"Document moved to {path} as {final_name}"
 
 
-def copy_to_folder(file_id: str, path: str, new_name: str | None = None) -> str:
-    """
-    Copy a document to a specific folder path (relative to ARCHIVE_ROOT_FOLDER_ID for year-based organization).
+def archive_copy_to_folder(file_id: str, path: str, new_name: str = None) -> str:
+    """Copy the current document to a specific folder path.
+
+    Use this when the document needs to be in multiple locations.
     The original file remains in its current location.
 
     Args:
-        file_id: The ID of the file to copy
-        path: The folder path relative to archive root (e.g., "2024/2024-01/Frete")
-        new_name: Optional new name for the copied file (should include .pdf extension)
+        file_id: The Google Drive file ID of the document to copy
+        path: Folder path relative to archive root, e.g. "2024/2024-01/Frete"
+        new_name: Optional new filename with .pdf extension
 
     Returns:
-        A confirmation message
+        Confirmation message
     """
-
     print(f"\n{GREEN}Copying to: {path}/{new_name if new_name else ''}{RESET}")
 
-    # Parse the path and create folder structure under ARCHIVE_ROOT_FOLDER_ID (which is ROOT_FOLDER_ID)
+    # Parse the path and create folder structure under ARCHIVE_ROOT_FOLDER_ID
     path_parts = path.split("/")
     parent_folder_id = create_folder_path(DRIVE_SERVICE, path_parts, ARCHIVE_ROOT_FOLDER_ID)
 
@@ -486,19 +492,20 @@ def copy_to_folder(file_id: str, path: str, new_name: str | None = None) -> str:
     return f"Document copied to {path} as {final_name} (copy ID: {copied_file.get('id')})"
 
 
-def move_to_left_behind(file_id: str, path: str, new_name: str | None = None) -> str:
-    """
-    Move a document to the left behind folder organized by year/month for documents that need additional review or processing.
+def archive_move_to_left_behind(file_id: str, path: str, new_name: str = None) -> str:
+    """Move the current document to the left behind folder for manual review.
+
+    Use this for documents that need additional review or processing.
+    The document will be organized by year/month in the Irrelevantes folder.
 
     Args:
-        file_id: The ID of the file to move
-        path: The folder path relative to LEFT_BEHIND_FOLDER_ID (e.g., "2024/2024-01")
-        new_name: Optional new name for the file (should include .pdf extension)
+        file_id: The Google Drive file ID of the document to move
+        path: Folder path relative to left behind folder, e.g. "2024/2024-01"
+        new_name: Optional new filename with .pdf extension
 
     Returns:
-        A confirmation message
+        Confirmation message
     """
-
     print(
         f"\n{CYAN}Moving to left behind folder: {path}/{new_name if new_name else ''}{RESET}"
     )
@@ -525,62 +532,6 @@ def move_to_left_behind(file_id: str, path: str, new_name: str | None = None) ->
 
     print(f"{GREEN}Done...{RESET}")
     return f"Document moved to left behind folder {path} as {final_name}"
-
-
-# =============================================================================
-# AI-Callable Tool Functions (for automatic function calling)
-# =============================================================================
-
-
-def archive_move_to_folder(file_id: str, path: str, new_name: str = None) -> str:
-    """Move the current document to a specific folder path for archiving.
-
-    Use this for standard document archiving based on year/month structure.
-    The path should be relative to the archive root folder.
-
-    Args:
-        file_id: The Google Drive file ID of the document to move
-        path: Folder path relative to archive root, e.g. "2024/2024-01/Impostos"
-        new_name: Optional new filename with .pdf extension, e.g. "2024-01-15 - FACTURA 123.pdf"
-
-    Returns:
-        Confirmation message
-    """
-    return move_to_folder(file_id, path, new_name)
-
-
-def archive_copy_to_folder(file_id: str, path: str, new_name: str = None) -> str:
-    """Copy the current document to a specific folder path.
-
-    Use this when the document needs to be in multiple locations.
-    The original file remains in its current location.
-
-    Args:
-        file_id: The Google Drive file ID of the document to copy
-        path: Folder path relative to archive root, e.g. "2024/2024-01/Frete"
-        new_name: Optional new filename with .pdf extension
-
-    Returns:
-        Confirmation message
-    """
-    return copy_to_folder(file_id, path, new_name)
-
-
-def archive_move_to_left_behind(file_id: str, path: str, new_name: str = None) -> str:
-    """Move the current document to the left behind folder for manual review.
-
-    Use this for documents that need additional review or processing.
-    The document will be organized by year/month in the Irrelevantes folder.
-
-    Args:
-        file_id: The Google Drive file ID of the document to move
-        path: Folder path relative to left behind folder, e.g. "2024/2024-01"
-        new_name: Optional new filename with .pdf extension
-
-    Returns:
-        Confirmation message
-    """
-    return move_to_left_behind(file_id, path, new_name)
 
 
 def archive_move_to_unclassified(file_id: str, reason: str) -> str:
