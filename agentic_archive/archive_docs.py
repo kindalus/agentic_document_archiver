@@ -475,15 +475,22 @@ Your task is to analyze classified documents and decide how to archive them base
 
 **DOCUMENT GROUPS AND ARCHIVING RULES**:
 
+     FACTURA_GLOBAL = "FACTURA_GLOBAL"
+     FACTURA_GENERICA = "FACTURA_GENERICA"
+     NOTA_DEBITO = "NOTA_DEBITO"
+     NOTA_CREDITO = "NOTA_CREDITO"
+     RECIBO = "RECIBO"
+     OUTRO_DOCUMENTO = "OUTRO_DOCUMENTO"
+
 1. **DOCUMENTOS_COMERCIAIS (Commercial Documents)**:
    - If document type is FACTURA_PRO_FORMA: move_to_unclassified
    - Check if nif_emitente == {COMPANY_FISCAL_ID}: We are the vendor
      - RECIBO: Archive to: {{{{year}}}}/{{{{year-month}}}}/[Facturas - Recibos - Clientes]
-     - Other types:  Archive to: {{{{year}}}}/{{{{year-month}}}}/[Facturas - Clientes]
+     - FACTURA_RECIBO, FACTURA, FACTURA_GLOBAL, FACTURA_GENERICA, NOTA_DE_CREDITO, NOTA_DEBITO:  Archive to: {{{{year}}}}/{{{{year-month}}}}/[Facturas - Clientes]
      - Filename: {{{{date}}}} - {{{{document_type}}}} {{{{document_number}}}}.pdf
    - Check if nif_cliente == {COMPANY_FISCAL_ID}: We are the client
      - RECIBOS: Archive to: {{{{year}}}}/{{{{year-month}}}}/Recibos - Fornecedores]
-     - Other types: Archive to: {{{{year}}}}/{{{{year-month}}}}/[Facturas - Fornecedores]
+     - FACTURA_RECIBO, FACTURA, FACTURA_GLOBAL, FACTURA_GENERICA, NOTA_DE_CREDITO, NOTA_DEBITO: Archive to: {{{{year}}}}/{{{{year-month}}}}/[Facturas - Fornecedores]
      - Filename: {{{{date}}}} - {{{{vendor_name}}}} - {{{{document_type}}}} {{{{document_number}}}}.pdf
    - If neither matches: move_to_unclassified
 
